@@ -36,8 +36,7 @@ then
 	echo "source version is not supplied and we will use ${SOURCE_VERSION}"
 fi
 PKG_VERSION=$(echo "${SOURCE_VERSION}" | tr '-' '.')
-#SOURCE_TIMESTAMP=$(git show -s --pretty="format:%ct" "${GIT_REVISION}^{commit}")
-SOURCE_TIMESTAMP=$(date +%s)
+SOURCE_TIMESTAMP=$(git show -s --pretty="format:%ct" "${GIT_REVISION}^{commit}")
 
 BUILD_DIR=$(mktemp -d "/tmp/build.${SOURCE_NAME}-${SOURCE_VERSION}.XXX")
 echo "==> Use temp build dir ${BUILD_DIR}"
@@ -47,10 +46,8 @@ echo "==> cleaning local cargo checkouts"
 cargo cache --autoclean
 
  
-#echo "==> adding source code from git"
-echo "==> adding source code from local directory"
-#git archive --format=tar --prefix="${SOURCE_NAME}-${PKG_VERSION}/" "${GIT_REVISION}" | tar -C "${BUILD_DIR}" -xf -
-rsync -a --exclude target --exclude .git ./ "${BUILD_DIR}/${SOURCE_NAME}-${PKG_VERSION}/"
+echo "==> adding source code from git"
+git archive --format=tar --prefix="${SOURCE_NAME}-${PKG_VERSION}/" "${GIT_REVISION}" | tar -C "${BUILD_DIR}" -xf -
 
 PROTO_DIR="${BUILD_DIR}/${SOURCE_NAME}-${PKG_VERSION}/${SOURCE_NAME}/proto"
 if [ -d ${PROTO_DIR} ]
