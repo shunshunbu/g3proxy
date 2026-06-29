@@ -1,6 +1,7 @@
 
 %undefine _debugsource_packages
 %define build_profile release-lto
+%global debug_package %{nil}
 
 Name:           g3fcgen
 Version:        0.8.5
@@ -33,11 +34,15 @@ cargo build --frozen --offline --profile %{build_profile} --no-default-features 
 rm -rf $RPM_BUILD_ROOT
 install -m 755 -D target/%{build_profile}/g3fcgen %{buildroot}%{_bindir}/g3fcgen
 install -m 644 -D %{name}/service/g3fcgen@.service %{buildroot}/lib/systemd/system/g3fcgen@.service
+install -m 755 -d %{buildroot}%{_sysconfdir}/%{name}
+cp -r etc/%{name}/* %{buildroot}%{_sysconfdir}/%{name}/
 
 
 %files
 %{_bindir}/g3fcgen
 /lib/systemd/system/g3fcgen@.service
+%{_sysconfdir}/%{name}
+%config(noreplace) %{_sysconfdir}/%{name}/*
 %license LICENSE
 %license LICENSE-BUNDLED
 %license LICENSE-FOREIGN

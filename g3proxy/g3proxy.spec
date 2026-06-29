@@ -1,6 +1,7 @@
 
 %undefine _debugsource_packages
 %define build_profile release-lto
+%global debug_package %{nil}
 
 Name:           g3proxy
 Version:        1.12.3
@@ -44,6 +45,8 @@ install -m 755 -D target/%{build_profile}/g3proxy-ctl %{buildroot}%{_bindir}/g3p
 install -m 755 -D target/%{build_profile}/g3proxy-ftp %{buildroot}%{_bindir}/g3proxy-ftp
 install -m 755 -D target/%{build_profile}/g3proxy-lua %{buildroot}%{_bindir}/g3proxy-lua
 install -m 644 -D %{name}/service/g3proxy@.service %{buildroot}/lib/systemd/system/g3proxy@.service
+install -m 755 -d %{buildroot}%{_sysconfdir}/%{name}
+cp -r etc/%{name}/* %{buildroot}%{_sysconfdir}/%{name}/
 
 
 %files
@@ -52,6 +55,8 @@ install -m 644 -D %{name}/service/g3proxy@.service %{buildroot}/lib/systemd/syst
 %{_bindir}/g3proxy-ftp
 %{_bindir}/g3proxy-lua
 /lib/systemd/system/g3proxy@.service
+%{_sysconfdir}/%{name}
+%config(noreplace) %{_sysconfdir}/%{name}/*
 %license LICENSE
 %license LICENSE-BUNDLED
 %license LICENSE-FOREIGN
