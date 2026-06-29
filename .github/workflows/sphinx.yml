@@ -1,0 +1,32 @@
+name: Sphinx-Doc
+permissions: { }
+
+on:
+  push:
+    paths:
+      - 'sphinx/**'
+  pull_request:
+    paths:
+      - 'sphinx/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component:
+          - g3proxy
+          - g3tiles
+          - g3keymess
+          - g3statsd
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install python3-sphinx python3-sphinx-rtd-theme
+      - uses: sphinx-doc/github-problem-matcher@1f74d6599f4a5e89a20d3c99aab4e6a70f7bda0f # v1.1
+      - run: sphinx-build sphinx/${{ matrix.component }} sphinx/${{ matrix.component }}/_build

@@ -1,0 +1,13 @@
+[package]
+name = "g3-xcrypt"
+version = "0.3.0"
+license.workspace = true
+edition.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+thiserror.workspace = true
+memchr.workspace = true
+openssl.workspace = true
+constant_time_eq.workspace = true

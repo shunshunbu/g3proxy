@@ -1,0 +1,68 @@
+[package]
+name = "g3-types"
+version = "0.6.0"
+license.workspace = true
+edition.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+idna.workspace = true
+libc.workspace = true
+percent-encoding.workspace = true
+rand.workspace = true
+rustc-hash.workspace = true
+fnv.workspace = true
+foldhash.workspace = true
+crc32fast = "1.5"
+smallvec.workspace = true
+smol_str.workspace = true
+memchr.workspace = true
+constant_time_eq.workspace = true
+url.workspace = true
+num-traits.workspace = true
+arc-swap.workspace = true
+ahash = { workspace = true, optional = true }
+fastrand = { workspace = true, optional = true }
+governor = { workspace = true, features = ["std", "jitter"] }
+blake3 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+ip_network = { workspace = true, optional = true }
+ip_network_table = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+radix_trie = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true }
+quinn = { workspace = true, optional = true }
+webpki-roots = { version = "1.0", optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+openssl = { workspace = true, optional = true }
+openssl-sys = { workspace = true, optional = true }
+lru = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+flume = { workspace = true, features = ["eventual-fairness"], optional = true }
+slog = { workspace = true, optional = true }
+indexmap = { workspace = true, optional = true }
+brotli = { version = "8.0", optional = true, default-features = false, features = ["std"] }
+g3-std-ext.workspace = true
+
+[features]
+default = []
+quic = []
+auth-crypt = ["dep:openssl", "dep:blake3", "dep:hex"]
+resolve = ["dep:ahash", "dep:radix_trie", "dep:fastrand"]
+quinn = ["dep:quinn", "quic"]
+rustls = ["dep:rustls", "dep:rustls-pki-types", "dep:webpki-roots", "dep:rustls-native-certs", "dep:lru", "dep:ahash"]
+rustls-ring = ["rustls", "rustls/ring", "quinn?/rustls-ring"]
+rustls-aws-lc = ["rustls", "rustls/aws-lc-rs", "quinn?/rustls-aws-lc-rs"]
+rustls-aws-lc-fips = ["rustls", "rustls/fips", "quinn?/rustls-aws-lc-rs-fips"]
+openssl = ["dep:openssl", "dep:openssl-sys", "dep:lru", "dep:bytes", "dep:ahash", "dep:brotli"]
+acl-rule = ["resolve", "dep:ahash", "dep:ip_network", "dep:ip_network_table", "dep:regex", "dep:radix_trie"]
+http = ["dep:http", "dep:bytes", "dep:base64"]
+route = ["resolve", "dep:ahash", "dep:radix_trie", "dep:indexmap"]
+async-log = ["dep:flume", "dep:slog"]

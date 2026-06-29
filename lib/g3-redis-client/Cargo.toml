@@ -1,0 +1,20 @@
+[package]
+name = "g3-redis-client"
+version = "0.2.0"
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+redis = { workspace = true, features = ["aio", "tokio-comp"] }
+tokio = { workspace = true, features = ["net"] }
+tokio-rustls.workspace = true
+rustls-pki-types.workspace = true
+yaml-rust = { workspace = true, optional = true }
+g3-types = { workspace = true, features = ["rustls"] }
+g3-socket.workspace = true
+g3-yaml = { workspace = true, optional = true, features = ["rustls"] }
+
+[features]
+default = []
+yaml = ["dep:g3-yaml", "dep:yaml-rust"]

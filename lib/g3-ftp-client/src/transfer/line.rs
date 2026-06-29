@@ -1,0 +1,86 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2023-2025 ByteDance and/or its affiliates.
+ */
+
+use tokio::io::{AsyncRead, AsyncWrite, BufStream};
+
+use g3_io_ext::LimitedBufReadExt;
+
+use crate::config::FtpTransferConfig;
+use crate::error::FtpLineDataReadError;
+
+#[allow(async_fn_in_trait)]
+pub trait FtpLineDataReceiver {
+    async fn recv_line(&mut self, line: &str);
+    fn should_return_early(&self) -> bool;
+}
+
+pub(crate) struct FtpLineDataTransfer<T: AsyncRead + AsyncWrite> {
+    io: BufStream<T>,
+    read_lines: usize,
+    max_lines: usize,
+    line_buf: Vec<u8>,
+}
+
+impl<T> FtpLineDataTransfer<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    pub(crate) fn new(io: T, config: &FtpTransferConfig) -> Self {
+        FtpLineDataTransfer {
+            io: BufStream::new(io),
+            read_lines: 0,
+            max_lines: config.list_max_entries,
+            line_buf: Vec::with_capacity(config.list_max_line_len),
+        }
+    }
+
+    async fn send_buf_to_receiver<R>(
+        &mut self,
+        receiver: &mut R,
+    ) -> Result<(), FtpLineDataReadError>
+    where
+        R: FtpLineDataReceiver,
+    {
+        let s = std::str::from_utf8(&self.line_buf)
+            .map_err(|_| FtpLineDataReadError::UnsupportedEncoding)?;
+        receiver.recv_line(s).await;
+        if receiver.should_return_early() {
+            self.read_lines += 1;
+            return Err(FtpLineDataReadError::AbortedByCallback);
+        }
+        self.line_buf.clear();
+        Ok(())
+    }
+
+    pub(crate) async fn read_to_end<R>(
+        mut self,
+        receiver: &mut R,
+    ) -> Result<(), FtpLineDataReadError>
+    where
+        R: FtpLineDataReceiver,
+    {
+        if !self.line_buf.is_empty() {
+            self.send_buf_to_receiver(receiver).await?;
+        }
+
+        for i in self.read_lines..self.max_lines {
+            let (found, nr) = self
+                .io
+                .limited_read_until(b'\n', self.line_buf.capacity(), &mut self.line_buf)
+                .await?;
+            if nr == 0 {
+                return Ok(());
+            }
+
+            if !found {
+                return Err(FtpLineDataReadError::LineTooLong(i + 1));
+            }
+
+            self.send_buf_to_receiver(receiver).await?;
+        }
+
+        Err(FtpLineDataReadError::TooManyLines)
+    }
+}

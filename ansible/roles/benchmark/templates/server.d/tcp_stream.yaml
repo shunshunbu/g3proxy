@@ -1,0 +1,14 @@
+---
+
+name: {{ server_name }}
+type: TcpStream
+
+escaper: {{ escaper_name }}
+
+listen:
+  address: "[::]:{{ benchmark_tcp_port }}"
+  backlog: 4096
+listen_in_worker: true
+
+upstream: "{{ benchmark_upstream_addr }}"
+

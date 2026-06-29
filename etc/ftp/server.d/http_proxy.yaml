@@ -1,0 +1,29 @@
+---
+# ============================================================
+# HTTP Proxy 服务器配置
+#
+# 功能：
+#   - 对外提供 HTTP CONNECT 代理服务
+#   - 通过协议检测识别 FTP 流量
+#   - 对 FTP 上传进行 ICAP 审计
+# ============================================================
+
+name: http_proxy
+escaper: default
+auditor: ftp_auditor
+type: http_proxy
+
+# 监听地址
+listen:
+  address: "0.0.0.0:3128"
+
+# 任务空闲最大次数
+# 超过此次数后任务将被关闭
+task_idle_max_count: 1800
+
+# TCP 速度限制
+# 格式: 数字 + 单位 (K/M/G)
+tcp_sock_speed_limit: 200M
+
+# TCP 复制缓冲区大小
+tcp_copy_buffer_size: 32KB

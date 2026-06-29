@@ -1,0 +1,20 @@
+[package]
+name = "g3-smtp-proto"
+version = "0.2.0"
+license.workspace = true
+edition.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+thiserror.workspace = true
+memchr.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+pin-project-lite.workspace = true
+log.workspace = true
+g3-types.workspace = true
+g3-io-ext.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "io-util", "rt"] }
+tokio-test.workspace = true

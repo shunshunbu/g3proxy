@@ -1,0 +1,19 @@
+
+# IDE
+.idea/
+.vscode/
+
+# Cargo
+/target/
+
+# generated bundled license
+LICENSE-BUNDLED
+
+# deb package
+/debian/
+
+# tmp file
+g3proxy/service/g3proxy@.service
+g3tiles/service/g3tiles@.service
+g3keymess/service/g3keymess@.service
+

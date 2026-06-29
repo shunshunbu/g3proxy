@@ -1,0 +1,38 @@
+[package]
+name = "g3fcgen"
+version = "0.8.5"
+license.workspace = true
+edition.workspace = true
+rust-version = "1.86.0"
+description = "G3 fake certificate generator"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+log = { workspace = true, features = ["max_level_trace", "release_max_level_debug"] }
+openssl.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "io-util", "time", "signal"] }
+flume = { workspace = true, features = ["async"] }
+yaml-rust.workspace = true
+g3-std-ext.workspace = true
+g3-types.workspace = true
+g3-yaml = { workspace = true, features = ["histogram", "openssl"] }
+g3-daemon.workspace = true
+g3-statsd-client.workspace = true
+g3-histogram.workspace = true
+g3-tls-cert.workspace = true
+g3-cert-agent.workspace = true
+g3-socket.workspace = true
+
+[build-dependencies]
+g3-build-env.workspace = true
+
+[features]
+default = []
+vendored-openssl = ["openssl/vendored"]
+vendored-tongsuo = ["openssl/tongsuo", "g3-cert-agent/tongsuo"]
+vendored-boringssl = ["openssl/boringssl"]
+vendored-aws-lc = ["openssl/aws-lc"]
+vendored-aws-lc-fips = ["openssl/aws-lc-fips"]

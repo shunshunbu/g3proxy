@@ -1,0 +1,14 @@
+name: https-uppayload
+protocol_inspection: { }
+			
+tls_cert_generator: { }
+tls_interception_client: { } # 代理对目标地址TLS连接参数
+tls_ticketer: { }
+h1_interception:
+    req_hasbody: true
+    req_body_min_size: 8
+#h2_interception: { } 
+application_audit_ratio: 1.0
+
+# tls_stream_dump: { }
+icap_reqmod_service: icap://127.0.0.1:1344/echo

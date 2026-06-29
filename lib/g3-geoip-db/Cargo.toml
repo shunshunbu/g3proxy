@@ -1,0 +1,13 @@
+[package]
+name = "g3-geoip-db"
+version = "0.3.0"
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+arc-swap.workspace = true
+ip_network.workspace = true
+ip_network_table.workspace = true
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+g3-geoip-types.workspace = true

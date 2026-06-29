@@ -1,0 +1,115 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2023-2025 ByteDance and/or its affiliates.
+ */
+
+use std::collections::HashSet;
+
+use anyhow::{Context, anyhow};
+use log::debug;
+use tokio::sync::Mutex;
+
+use g3_types::metrics::NodeName;
+use g3_yaml::YamlDocPosition;
+
+use super::registry;
+use crate::auth::UserGroup;
+use crate::config::auth::UserGroupConfig;
+
+static USER_GROUP_OPS_LOCK: Mutex<()> = Mutex::const_new(());
+
+pub async fn load_all() -> anyhow::Result<()> {
+    let _guard = USER_GROUP_OPS_LOCK.lock().await;
+
+    let mut new_names = HashSet::<NodeName>::new();
+
+    let all_config = crate::config::auth::get_all();
+    for config in all_config {
+        let name = config.name();
+        new_names.insert(name.clone());
+        match registry::get_config(name) {
+            Some(old) => {
+                debug!("reloading user group {name}");
+                reload_old_unlocked(old, config.as_ref().clone()).await?;
+                debug!("user group {name} reload OK");
+            }
+            None => {
+                debug!("creating user group {name}");
+                spawn_new_unlocked(config.as_ref().clone()).await?;
+                debug!("user group {name} create OK");
+            }
+        }
+    }
+
+    for name in &registry::get_names() {
+        if !new_names.contains(name) {
+            debug!("deleting user group {name}");
+            registry::del(name);
+            crate::serve::update_dependency_to_user_group(name, "deleted").await;
+            debug!("user group {name} deleted");
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn reload(
+    name: &NodeName,
+    position: Option<YamlDocPosition>,
+) -> anyhow::Result<()> {
+    let _guard = USER_GROUP_OPS_LOCK.lock().await;
+
+    let old_config = match registry::get_config(name) {
+        Some(config) => config,
+        None => return Err(anyhow!("no user group with name {name} found")),
+    };
+
+    let position = match position {
+        Some(position) => position,
+        None => match old_config.position() {
+            Some(position) => position,
+            None => {
+                return Err(anyhow!(
+                    "no config position for user group {name} found, reload is not supported"
+                ));
+            }
+        },
+    };
+
+    let position2 = position.clone();
+    let config =
+        tokio::task::spawn_blocking(move || crate::config::auth::load_at_position(&position2))
+            .await
+            .map_err(|e| anyhow!("unable to join conf load task: {e}"))?
+            .context(format!("unload to load conf at position {position}"))?;
+    if name != config.name() {
+        return Err(anyhow!(
+            "user group at position {position} has name {}, while we expect {name}",
+            config.name()
+        ));
+    }
+
+    debug!("reloading user group {name} from position {position}");
+    reload_old_unlocked(old_config, config).await?;
+    debug!("user group {name} reload OK");
+    Ok(())
+}
+
+async fn reload_old_unlocked(old: UserGroupConfig, new: UserGroupConfig) -> anyhow::Result<()> {
+    let name = old.name();
+    let Some(old_group) = registry::get(name) else {
+        return Err(anyhow!("no user group with name {name} found"));
+    };
+    let new_group = old_group.reload(new)?;
+    registry::add(name.clone(), new_group);
+    crate::serve::update_dependency_to_user_group(name, "reloaded").await;
+    Ok(())
+}
+
+async fn spawn_new_unlocked(config: UserGroupConfig) -> anyhow::Result<()> {
+    let name = config.name().clone();
+    let group = UserGroup::new_with_config(config).await?;
+    registry::add(name.clone(), group);
+    crate::serve::update_dependency_to_user_group(&name, "spawned").await;
+    Ok(())
+}

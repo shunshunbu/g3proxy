@@ -1,0 +1,45 @@
+[package]
+name = "g3-yaml"
+version = "0.6.0"
+license.workspace = true
+edition.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow.workspace = true
+yaml-rust.workspace = true
+humanize-rs.workspace = true
+idna.workspace = true
+ascii.workspace = true
+chrono.workspace = true
+url.workspace = true
+rand.workspace = true
+ip_network = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true, features = ["std"] }
+openssl = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+g3-types.workspace = true
+g3-histogram = { workspace = true, optional = true }
+g3-compat = { workspace = true, optional = true }
+g3-dpi = { workspace = true, optional = true }
+g3-geoip-types = { workspace = true, optional = true }
+
+[dev-dependencies]
+chrono = { workspace = true, features = ["serde", "clock"] }
+
+[features]
+default = []
+histogram = ["dep:g3-histogram"]
+regex = ["dep:regex"]
+resolve = ["g3-types/resolve"]
+rustls = ["g3-types/rustls", "dep:rustls-pki-types"]
+openssl = ["g3-types/openssl", "dep:openssl"]
+quinn = ["g3-types/quinn"]
+http = ["g3-types/http", "dep:http"]
+acl-rule = ["regex", "g3-types/acl-rule", "dep:ip_network"]
+route = ["g3-types/route"]
+sched = ["dep:g3-compat"]
+dpi = ["dep:g3-dpi", "acl-rule"]
+geoip = ["dep:g3-geoip-types"]

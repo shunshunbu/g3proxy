@@ -1,0 +1,34 @@
+---
+# ============================================================
+# g3proxy HTTP CONNECT FTP 代理配置示例
+#
+# 功能说明：
+#   - FTP 客户端通过 HTTP CONNECT 代理访问外部 FTP 服务器
+#   - 支持对 FTP 上传文件进行 ICAP 审计（不阻断传输）
+#   - 支持明文 FTP 和 FTPS (AUTH TLS) 两种模式
+#
+# 使用方式：
+#   1. FTP 客户端配置 HTTP/1.1 CONNECT 代理
+#   2. 代理地址：g3proxy 监听地址 (0.0.0.0:3128)
+#   3. FTP 站点目标地址填写真实的 FTP 服务器地址
+#
+# 运行命令：
+#   ./target/debug/g3proxy --conf-dir examples/ftp_over_http_connect/
+# ============================================================
+
+runtime:
+  thread_number: 2
+
+log: stdout
+
+# 审计器配置目录
+auditor: auditor.d/
+
+# 服务器配置目录
+server: server.d/
+
+# DNS 解析器配置目录
+resolver: resolver.d/
+
+# 出口路由配置目录
+escaper: escaper.d/

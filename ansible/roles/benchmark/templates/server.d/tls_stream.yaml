@@ -1,0 +1,19 @@
+---
+
+name: {{ server_name }}
+type: TlsStream
+
+escaper: {{ escaper_name }}
+
+listen:
+  address: "[::]:{{ benchmark_tls_port }}"
+  backlog: 4096
+listen_in_worker: true
+
+tls_server:
+  cert_pairs:
+    certificate: "{{ server_name }}-{{ tls_name }}.pem"
+    private_key: "{{ server_name }}-{{ tls_name }}-key.pem"
+
+upstream: "{{ benchmark_upstream_addr }}"
+

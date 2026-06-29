@@ -1,0 +1,40 @@
+[package]
+name = "g3-io-ext"
+version = "0.8.0"
+license.workspace = true
+edition.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time", "net", "io-util", "sync", "rt"] }
+tokio-util = { workspace = true, features = ["time"] }
+tokio-rustls = { workspace = true, optional = true }
+futures-util.workspace = true
+pin-project-lite.workspace = true
+memchr.workspace = true
+fastrand.workspace = true
+bytes.workspace = true
+ahash.workspace = true
+smallvec.workspace = true
+arc-swap.workspace = true
+quinn = { workspace = true, optional = true }
+g3-io-sys.workspace = true
+g3-socket.workspace = true
+g3-std-ext.workspace = true
+g3-types.workspace = true
+g3-resolver = { workspace = true, optional = true }
+g3-openssl = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros"] }
+tokio-test.workspace = true
+governor = { workspace = true, features = ["std", "jitter"] }
+
+[features]
+default = []
+resolver = ["dep:g3-resolver"]
+openssl = ["dep:g3-openssl"]
+rustls = ["dep:tokio-rustls"]
+quic = ["dep:quinn"]

@@ -1,0 +1,217 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2024-2025 ByteDance and/or its affiliates.
+ */
+
+use std::io;
+use std::net::SocketAddr;
+
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::UdpSocket;
+use tokio::runtime::Handle;
+use tokio::sync::mpsc;
+
+use crate::ExportedPduDissectorHint;
+
+mod config;
+pub use config::StreamDumpConfig;
+
+mod sink;
+use sink::Sinker;
+
+mod header;
+use header::PduHeader;
+pub use header::{
+    ProxyToClientPduHeader, ProxyToRemotePduHeader, StreamDumpProxyAddresses, ToClientPduHeader,
+    ToRemotePduHeader,
+};
+
+mod state;
+use state::StreamDumpState;
+
+mod write;
+pub use write::{
+    ProxyToClientStreamDumpWriter, ProxyToRemoteStreamDumpWriter, StreamDumpWriter,
+    ToClientStreamDumpWriter, ToRemoteStreamDumpWriter,
+};
+
+mod read;
+pub use read::{
+    FromClientStreamDumpReader, FromRemoteStreamDumpReader, ProxyFromClientStreamDumpReader,
+    ProxyFromRemoteStreamDumpReader, StreamDumpReader,
+};
+
+pub struct StreamDumper {
+    config: StreamDumpConfig,
+    sender: mpsc::UnboundedSender<Vec<u8>>,
+}
+
+impl StreamDumper {
+    pub fn new(config: StreamDumpConfig, runtime: &Handle) -> io::Result<Self> {
+        let socket = g3_socket::udp::new_std_socket_to(
+            config.peer,
+            &Default::default(),
+            config.buffer,
+            config.opts,
+        )?;
+        socket.connect(config.peer)?;
+
+        let (sender, receiver) = mpsc::unbounded_channel();
+
+        runtime.spawn(async move {
+            let socket = UdpSocket::from_std(socket).unwrap();
+            Sinker::new(receiver, socket).into_running().await;
+        });
+
+        Ok(StreamDumper { config, sender })
+    }
+
+    #[inline]
+    pub fn client_side(&self) -> bool {
+        self.config.client_side
+    }
+
+    pub fn wrap_writer<CW, RW>(
+        &self,
+        client_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        dissector_hint: ExportedPduDissectorHint,
+        client_writer: CW,
+        remote_writer: RW,
+    ) -> (ToClientStreamDumpWriter<CW>, ToRemoteStreamDumpWriter<RW>)
+    where
+        CW: AsyncWrite,
+        RW: AsyncWrite,
+    {
+        let (to_c, to_r) = header::new_pair(client_addr, remote_addr, dissector_hint);
+        let cw = StreamDumpWriter::new(
+            client_writer,
+            to_c,
+            self.sender.clone(),
+            self.config.packet_size,
+        );
+        let rw = StreamDumpWriter::new(
+            remote_writer,
+            to_r,
+            self.sender.clone(),
+            self.config.packet_size,
+        );
+        (cw, rw)
+    }
+
+    pub fn wrap_remote_io<R, W>(
+        &self,
+        client_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        dissector_hint: ExportedPduDissectorHint,
+        remote_reader: R,
+        remote_writer: W,
+    ) -> (FromRemoteStreamDumpReader<R>, ToRemoteStreamDumpWriter<W>)
+    where
+        R: AsyncRead,
+        W: AsyncWrite,
+    {
+        let (to_c, to_r) = header::new_pair(client_addr, remote_addr, dissector_hint);
+        let r = StreamDumpReader::new(
+            remote_reader,
+            to_c,
+            self.sender.clone(),
+            self.config.packet_size,
+        );
+        let w = StreamDumpWriter::new(
+            remote_writer,
+            to_r,
+            self.sender.clone(),
+            self.config.packet_size,
+        );
+        (r, w)
+    }
+
+    pub fn wrap_client_io<R, W>(
+        &self,
+        client_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        dissector_hint: ExportedPduDissectorHint,
+        client_reader: R,
+        client_writer: W,
+    ) -> (FromClientStreamDumpReader<R>, ToClientStreamDumpWriter<W>)
+    where
+        R: AsyncRead,
+        W: AsyncWrite,
+    {
+        let (to_c, to_r) = header::new_pair(client_addr, remote_addr, dissector_hint);
+        let r = StreamDumpReader::new(
+            client_reader,
+            to_r,
+            self.sender.clone(),
+            self.config.packet_size,
+        );
+        let w = StreamDumpWriter::new(
+            client_writer,
+            to_c,
+            self.sender.clone(),
+            self.config.packet_size,
+        );
+        (r, w)
+    }
+
+    pub fn wrap_proxy_remote_io<R, W>(
+        &self,
+        addresses: StreamDumpProxyAddresses,
+        dissector_hint: ExportedPduDissectorHint,
+        remote_reader: R,
+        remote_writer: W,
+    ) -> (
+        ProxyFromRemoteStreamDumpReader<R>,
+        ProxyToRemoteStreamDumpWriter<W>,
+    )
+    where
+        R: AsyncRead,
+        W: AsyncWrite,
+    {
+        let (to_c, to_r) = header::new_proxy_pair(addresses, dissector_hint);
+        let r = StreamDumpReader::new(
+            remote_reader,
+            to_c,
+            self.sender.clone(),
+            self.config.packet_size,
+        );
+        let w = StreamDumpWriter::new(
+            remote_writer,
+            to_r,
+            self.sender.clone(),
+            self.config.packet_size,
+        );
+        (r, w)
+    }
+
+    pub fn wrap_proxy_client_io<R, W>(
+        &self,
+        addresses: StreamDumpProxyAddresses,
+        dissector_hint: ExportedPduDissectorHint,
+        client_reader: R,
+        client_writer: W,
+    ) -> (
+        ProxyFromClientStreamDumpReader<R>,
+        ProxyToClientStreamDumpWriter<W>,
+    )
+    where
+        R: AsyncRead,
+        W: AsyncWrite,
+    {
+        let (to_c, to_r) = header::new_proxy_pair(addresses, dissector_hint);
+        let r = StreamDumpReader::new(
+            client_reader,
+            to_r,
+            self.sender.clone(),
+            self.config.packet_size,
+        );
+        let w = StreamDumpWriter::new(
+            client_writer,
+            to_c,
+            self.sender.clone(),
+            self.config.packet_size,
+        );
+        (r, w)
+    }
+}

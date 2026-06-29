@@ -1,0 +1,16 @@
+[package]
+name = "g3-h2"
+version = "0.2.0"
+license.workspace = true
+edition.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+thiserror.workspace = true
+bytes.workspace = true
+h2.workspace = true
+http.workspace = true
+tokio = { workspace = true, features = ["macros", "time"] }
+g3-http.workspace = true
+g3-io-ext.workspace = true

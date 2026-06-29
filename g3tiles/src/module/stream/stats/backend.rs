@@ -1,0 +1,124 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2024-2025 ByteDance and/or its affiliates.
+ */
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use arc_swap::ArcSwapOption;
+
+use g3_histogram::{HistogramMetricsConfig, HistogramRecorder, HistogramStats};
+use g3_std_ext::time::DurationExt;
+use g3_types::metrics::{MetricTagMap, NodeName};
+use g3_types::stats::StatId;
+
+pub(crate) struct StreamBackendStats {
+    name: NodeName,
+    id: StatId,
+    extra_metrics_tags: Arc<ArcSwapOption<MetricTagMap>>,
+
+    conn_attempt: AtomicU64,
+    conn_established: AtomicU64,
+}
+
+impl StreamBackendStats {
+    pub(crate) fn new(name: &NodeName) -> Self {
+        StreamBackendStats {
+            name: name.clone(),
+            id: StatId::new_unique(),
+            extra_metrics_tags: Arc::new(ArcSwapOption::new(None)),
+            conn_attempt: AtomicU64::new(0),
+            conn_established: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn set_extra_tags(&self, tags: Option<Arc<MetricTagMap>>) {
+        self.extra_metrics_tags.store(tags);
+    }
+
+    pub(crate) fn load_extra_tags(&self) -> Option<Arc<MetricTagMap>> {
+        self.extra_metrics_tags.load_full()
+    }
+
+    #[inline]
+    pub(crate) fn name(&self) -> &NodeName {
+        &self.name
+    }
+
+    #[inline]
+    pub(crate) fn stat_id(&self) -> StatId {
+        self.id
+    }
+
+    pub(crate) fn add_conn_attempt(&self) {
+        self.conn_attempt.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn conn_attempt(&self) -> u64 {
+        self.conn_attempt.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn add_conn_established(&self) {
+        self.conn_established.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn conn_established(&self) -> u64 {
+        self.conn_established.load(Ordering::Relaxed)
+    }
+}
+
+pub(crate) struct StreamBackendDurationStats {
+    name: NodeName,
+    id: StatId,
+    extra_metrics_tags: Arc<ArcSwapOption<MetricTagMap>>,
+
+    pub(crate) connect: Arc<HistogramStats>,
+}
+
+impl StreamBackendDurationStats {
+    pub(crate) fn set_extra_tags(&self, tags: Option<Arc<MetricTagMap>>) {
+        self.extra_metrics_tags.store(tags);
+    }
+
+    pub(crate) fn load_extra_tags(&self) -> Option<Arc<MetricTagMap>> {
+        self.extra_metrics_tags.load_full()
+    }
+
+    #[inline]
+    pub(crate) fn name(&self) -> &NodeName {
+        &self.name
+    }
+
+    #[inline]
+    pub(crate) fn stat_id(&self) -> StatId {
+        self.id
+    }
+}
+
+pub(crate) struct StreamBackendDurationRecorder {
+    pub(crate) connect: HistogramRecorder<u64>,
+}
+
+impl StreamBackendDurationRecorder {
+    pub(crate) fn new(
+        name: &NodeName,
+        config: &HistogramMetricsConfig,
+    ) -> (StreamBackendDurationRecorder, StreamBackendDurationStats) {
+        let (connect_r, connect_s) =
+            config.build_spawned(g3_daemon::runtime::main_handle().cloned());
+        let r = StreamBackendDurationRecorder { connect: connect_r };
+        let s = StreamBackendDurationStats {
+            name: name.clone(),
+            id: StatId::new_unique(),
+            extra_metrics_tags: Arc::new(ArcSwapOption::new(None)),
+            connect: connect_s,
+        };
+        (r, s)
+    }
+
+    pub(crate) fn record_connect_time(&self, dur: Duration) {
+        let _ = self.connect.record(dur.as_nanos_u64());
+    }
+}

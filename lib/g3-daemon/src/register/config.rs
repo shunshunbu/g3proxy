@@ -1,0 +1,101 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2023-2025 ByteDance and/or its affiliates.
+ */
+
+use std::time::Duration;
+
+use anyhow::{Context, anyhow};
+use http::uri::PathAndQuery;
+use yaml_rust::{Yaml, yaml};
+
+use g3_types::metrics::MetricTagMap;
+use g3_types::net::UpstreamAddr;
+
+pub struct RegisterConfig {
+    pub(crate) upstream: UpstreamAddr,
+    pub(crate) startup_retry: usize,
+    pub(crate) retry_interval: Duration,
+    pub(crate) register_path: PathAndQuery,
+    pub(crate) ping_path: PathAndQuery,
+    pub(crate) ping_interval: Duration,
+    pub(crate) extra_data: MetricTagMap,
+}
+
+impl Default for RegisterConfig {
+    fn default() -> Self {
+        RegisterConfig {
+            upstream: UpstreamAddr::empty(),
+            startup_retry: 3,
+            retry_interval: Duration::from_secs(1),
+            register_path: PathAndQuery::from_static("/register"),
+            ping_path: PathAndQuery::from_static("/ping"),
+            ping_interval: Duration::from_secs(60),
+            extra_data: MetricTagMap::default(),
+        }
+    }
+}
+
+impl RegisterConfig {
+    #[inline]
+    pub fn startup_retry(&self) -> usize {
+        self.startup_retry
+    }
+
+    #[inline]
+    pub fn retry_interval(&self) -> Duration {
+        self.retry_interval
+    }
+
+    pub(crate) fn parse(&mut self, v: &Yaml) -> anyhow::Result<()> {
+        match v {
+            Yaml::Hash(map) => self.parse_map(map),
+            Yaml::String(_) => {
+                self.upstream = g3_yaml::value::as_upstream_addr(v, 0)
+                    .context("invalid upstream address string value")?;
+                Ok(())
+            }
+            _ => Err(anyhow!("invalid yaml value type")),
+        }
+    }
+
+    fn parse_map(&mut self, map: &yaml::Hash) -> anyhow::Result<()> {
+        g3_yaml::foreach_kv(map, |k, v| match g3_yaml::key::normalize(k).as_str() {
+            "upstream" => {
+                self.upstream = g3_yaml::value::as_upstream_addr(v, 0)
+                    .context(format!("invalid upstream address value for key {k}"))?;
+                Ok(())
+            }
+            "startup_retry" => {
+                self.startup_retry = g3_yaml::value::as_usize(v)?;
+                Ok(())
+            }
+            "retry_interval" => {
+                self.retry_interval = g3_yaml::humanize::as_duration(v)
+                    .context(format!("invalid humanize duration value for key {k}"))?;
+                Ok(())
+            }
+            "register_path" => {
+                self.register_path = g3_yaml::value::as_http_path_and_query(v)
+                    .context(format!("invalid http path_query value for key {k}"))?;
+                Ok(())
+            }
+            "ping_path" => {
+                self.ping_path = g3_yaml::value::as_http_path_and_query(v)
+                    .context(format!("invalid http path_query value for key {k}"))?;
+                Ok(())
+            }
+            "ping_interval" => {
+                self.ping_interval = g3_yaml::humanize::as_duration(v)
+                    .context(format!("invalid humanize duration value for key {k}"))?;
+                Ok(())
+            }
+            "extra_data" => {
+                self.extra_data = g3_yaml::value::as_static_metrics_tags(v)
+                    .context(format!("invalid static metrics tags value for key {k}"))?;
+                Ok(())
+            }
+            _ => Err(anyhow!("invalid key {k}")),
+        })
+    }
+}

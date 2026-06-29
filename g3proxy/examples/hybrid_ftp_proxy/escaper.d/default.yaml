@@ -1,0 +1,5 @@
+---
+name: default
+type: direct_fixed
+resolver: default
+tcp_sock_speed_limit: 200M

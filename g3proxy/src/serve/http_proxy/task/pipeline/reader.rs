@@ -1,0 +1,177 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2023-2025 ByteDance and/or its affiliates.
+ */
+
+use std::sync::Arc;
+
+use log::trace;
+use tokio::io::AsyncRead;
+use tokio::sync::mpsc;
+
+use g3_io_ext::{GlobalLimitGroup, LimitedBufReadExt, LimitedBufReader, NilLimitedReaderStats};
+
+use super::protocol::{HttpClientReader, HttpProxyRequest};
+use super::{CommonTaskContext, HttpProxyCltWrapperStats, HttpProxyPipelineStats};
+use crate::module::http_forward::HttpProxyClientResponse;
+use crate::serve::ServerStats;
+
+pub(crate) struct HttpProxyPipelineReaderTask<CDR> {
+    ctx: Arc<CommonTaskContext>,
+    task_queue: mpsc::Sender<Result<HttpProxyRequest<CDR>, HttpProxyClientResponse>>,
+    stream_reader: Option<HttpClientReader<CDR>>,
+    pipeline_stats: Arc<HttpProxyPipelineStats>,
+}
+
+impl<CDR> HttpProxyPipelineReaderTask<CDR>
+where
+    CDR: AsyncRead + Send + Unpin + 'static,
+{
+    pub(crate) fn new(
+        ctx: &Arc<CommonTaskContext>,
+        task_sender: mpsc::Sender<Result<HttpProxyRequest<CDR>, HttpProxyClientResponse>>,
+        read_half: CDR,
+        pipeline_stats: &Arc<HttpProxyPipelineStats>,
+    ) -> Self {
+        let clt_r_stats = HttpProxyCltWrapperStats::new_for_reader(&ctx.server_stats);
+        let limit_config = &ctx.server_config.tcp_sock_speed_limit;
+        let clt_r = LimitedBufReader::new(
+            read_half,
+            limit_config.shift_millis,
+            limit_config.max_north,
+            clt_r_stats,
+            Arc::new(NilLimitedReaderStats::default()),
+        );
+        HttpProxyPipelineReaderTask {
+            ctx: Arc::clone(ctx),
+            task_queue: task_sender,
+            stream_reader: Some(clt_r),
+            pipeline_stats: Arc::clone(pipeline_stats),
+        }
+    }
+
+    pub(crate) async fn into_running(mut self) {
+        // NOTE the receiver end should not be cloned, as the closed events is bounding to each
+        let task_queue = self.task_queue.clone(); // to avoid ref self
+        tokio::select! {
+            biased;
+
+            _ = task_queue.closed() => {
+                trace!("write end has closed for previous request");
+            }
+            _ = self.run() => {}
+        }
+    }
+
+    async fn run(&mut self) {
+        let (stream_sender, mut stream_receiver) = mpsc::channel(1);
+        loop {
+            if let Some(mut reader) = self.stream_reader.take() {
+                let quit_after_timeout = self.pipeline_stats.get_alive_task() <= 0;
+
+                match tokio::time::timeout(
+                    self.ctx.server_config.pipeline_read_idle_timeout,
+                    reader.fill_wait_data(),
+                )
+                .await
+                {
+                    Ok(Ok(true)) => {}
+                    Ok(Ok(false)) => {
+                        trace!("client {} closed", self.ctx.client_addr());
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        trace!("client {} closed with error {e:?}", self.ctx.client_addr());
+                        break;
+                    }
+                    Err(_) => {
+                        // timeout
+                        self.stream_reader = Some(reader);
+                        if quit_after_timeout {
+                            // TODO may be attack
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
+                let mut version: http::Version = http::Version::HTTP_11; // default to 1.1
+                match tokio::time::timeout(
+                    self.ctx.server_config.timeout.recv_req_header,
+                    HttpProxyRequest::parse(
+                        &self.ctx.server_config,
+                        &mut reader,
+                        stream_sender.clone(),
+                        &mut version,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok((mut req, send_reader))) => {
+                        if send_reader {
+                            req.body_reader = Some(reader);
+                        } else {
+                            self.stream_reader = Some(reader);
+                        }
+
+                        let server_is_online = self.ctx.server_stats.is_online();
+                        if !server_is_online {
+                            // According to https://datatracker.ietf.org/doc/html/rfc7230#section-6.3.2
+                            // A client that pipelines requests SHOULD retry unanswered requests if
+                            // the connection closes before it receives all of the corresponding
+                            // responses.
+                            req.inner.disable_keep_alive();
+                        }
+
+                        if self.task_queue.send(Ok(req)).await.is_err() {
+                            trace!(
+                                "write end has closed for previous request while sending new request"
+                            );
+                            break;
+                        }
+                        self.pipeline_stats.add_task();
+
+                        if !server_is_online {
+                            break;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        self.stream_reader = Some(reader);
+                        if let Some(response) =
+                            HttpProxyClientResponse::from_request_error(&e, version)
+                        {
+                            if self.task_queue.send(Err(response)).await.is_err() {
+                                trace!(
+                                    "write end has closed for previous request while sending error response"
+                                );
+                            }
+                        }
+                        trace!("Error handling client {}: {e:?}", self.ctx.client_addr());
+                        // TODO handle error, negotiation failed, may be attack
+                        break;
+                    }
+                    Err(_) => {
+                        trace!("timeout to read in a complete request header");
+                        // TODO handle timeout, may be attack
+                        break;
+                    }
+                }
+            } else {
+                match stream_receiver.recv().await.flatten() {
+                    Some(mut reader) => {
+                        // we can now read the next request
+                        reader.reset_buffer_stats(Arc::new(NilLimitedReaderStats::default()));
+                        let limit_config = &self.ctx.server_config.tcp_sock_speed_limit;
+                        reader.reset_local_limit(limit_config.shift_millis, limit_config.max_north);
+                        reader.retain_global_limiter_by_group(GlobalLimitGroup::Server);
+                        self.stream_reader = Some(reader);
+                    }
+                    None => {
+                        // write end closed normally, task done
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}

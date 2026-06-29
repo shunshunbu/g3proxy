@@ -1,0 +1,83 @@
+---
+# ============================================================
+# g3proxy FTP Proxy 配置示例
+#
+# 场景一：原生 FTP 代理 + 明文上游 + ICAP 审计
+# 场景二：原生 FTP 代理 + FTPS explicit 上游 + ICAP 审计
+# 场景三：FTPS implicit MITM 代理 + ICAP 审计
+#
+# 将此文件放入 conf.d/server.d/ 目录
+# ============================================================
+
+---
+# 场景一：原生明文 FTP 代理
+# FileZilla 连接方式：主机=代理地址, 端口=2121, 协议=FTP, 加密=不使用 TLS
+name: ftp_plain
+escaper: default
+auditor: icap_auditor          # 在 auditor.d/ 中配置的 ICAP 审计器名称
+type: ftp_proxy
+listen:
+  address: "0.0.0.0:2121"
+# 上游 FTP 服务器列表（按连接随机分配）
+upstream:
+  - "ftp.example.com:21"
+# 启用上传审计（STOR/APPE/STOU），不阻断
+audit:
+  upload: true
+# 上游连接类型：plain_ftp（默认）/ explicit_ftps / implicit_ftps
+tls_upstream_type: plain_ftp
+task_idle_max_count: 1800
+tcp_sock_speed_limit: 200M
+
+---
+# 场景二：原生 FTP 代理 + FTPS explicit 上游
+# FileZilla 连接方式：主机=代理地址, 端口=2121, 协议=FTP, 加密=不使用 TLS
+# g3proxy 内部连接上游时使用 AUTH TLS 升级到加密连接
+name: ftp_explicit_ftps
+escaper: default
+auditor: icap_auditor
+type: ftp_proxy
+listen:
+  address: "0.0.0.0:2122"
+upstream:
+  - "ftp.example.com:21"
+audit:
+  upload: true
+# 上游使用 AUTH TLS（explicit FTPS），TLS 握手后上传内容仍经过 ICAP
+tls_upstream_type: explicit_ftps
+tls_upstream:
+  ca Certificates: []    # 信任的上游 CA 证书，留空则跳过证书验证
+  verify: true
+  sni: true
+task_idle_max_count: 1800
+
+---
+# 场景三：FTPS implicit TLS MITM 代理
+# FileZilla 连接方式：主机=代理地址, 端口=990, 协议=FTP over TLS,
+#                   加密=使用显式 TLS, 登录类型=正常
+# g3proxy 充当 TLS MITM：终止客户端 TLS → 解析 FTP 命令 → ICAP 审计
+#                   → 连接上游 FTP/FTPS 服务器
+name: ftps_implicit_mitm
+escaper: default
+auditor: icap_auditor
+type: ftp_proxy
+listen:
+  address: "0.0.0.0:990"
+  tls_server:
+    certificate: /path/to/server.crt
+    private_key: /path/to/server.key
+upstream:
+  - "ftp.example.com:21"
+audit:
+  upload: true
+# 上游可以是明文或 FTPS
+tls_upstream_type: plain_ftp
+task_idle_max_count: 1800
+
+---
+# FTP over HTTP CONNECT 场景（由 http_proxy 提供，ftp_proxy 配置不受影响）
+# FileZilla 连接方式：
+#   主机=代理地址, 端口=3128, 协议=FTP, 加密=使用显式 TLS (或不使用 TLS)
+#   在 FileZilla 站点管理器 → 代理 中选择 HTTP/1.1 代理
+# g3proxy 在 HTTP CONNECT 隧道中检测 FTP 协议，对上传进行 ICAP 审计
+# 配置在 http_proxy 的 inspect.protocol_inspection 下启用 FTP 检测
