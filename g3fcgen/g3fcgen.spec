@@ -41,7 +41,6 @@ cp -r etc/%{name}/* %{buildroot}%{_sysconfdir}/%{name}/
 %files
 %{_bindir}/g3fcgen
 /lib/systemd/system/g3fcgen@.service
-%{_sysconfdir}/%{name}
 %config(noreplace) %{_sysconfdir}/%{name}/*
 %license LICENSE
 %license LICENSE-BUNDLED

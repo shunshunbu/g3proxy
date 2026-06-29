@@ -56,7 +56,6 @@ cp -r etc/%{name}/* %{buildroot}%{_sysconfdir}/%{name}/
 %{_bindir}/g3proxy-ftp
 %{_bindir}/g3proxy-lua
 /lib/systemd/system/g3proxy@.service
-%{_sysconfdir}/%{name}
 %config(noreplace) %{_sysconfdir}/%{name}/*
 %license LICENSE
 %license LICENSE-BUNDLED
