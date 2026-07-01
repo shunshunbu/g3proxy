@@ -503,11 +503,10 @@ impl<I: IdleCheck> FtpUploadAdapter<I> {
 }
 
 /// Send a single chunk to ICAP in `<hex-size>\r\n<data>\r\n` form.
+/// (HTTP/1.1 chunked transfer encoding per RFC 7230 4.1).
 async fn write_icap_chunk<W: AsyncWrite + Unpin>(writer: &mut W, data: &[u8]) -> io::Result<()> {
-    let mut hex = itoa::Buffer::new();
-    let hex_s = hex.format(data.len());
-    writer.write_all(hex_s.as_bytes()).await?;
-    writer.write_all(b"\r\n").await?;
+    let chunk_header = format!("{:x}\r\n",data.len());
+    writer.write_all(chunk_header.as_bytes()).await?;
     writer.write_all(data).await?;
     writer.write_all(b"\r\n").await
 }
