@@ -165,6 +165,15 @@ where
                             break;
                         }
                         Ok(n) => {
+                            // Prepend the chunk we just read so the spawned
+                            // relay task sees a continuous stream from byte 0.
+                            // Previously we wrote this chunk to ups_w
+                            // synchronously here; that would block the whole
+                            // intercept_pending if upstream backpressured us,
+                            // which is what caused large-file (>1 GiB) uploads
+                            // to hang and trigger TCP retransmits.
+                            let clt_r = io::Cursor::new(clt_buf[..n].to_vec()).chain(clt_r);
+
                             if let Some(upload_info) = check_ftp_upload_data(
                                 ctx.task_notes.client_addr,
                                 ctx.connect_notes.server_addr,
@@ -172,7 +181,6 @@ where
                                 let icap_client = match ctx.audit_handle.icap_reqmod_client().cloned() {
                                     Some(client) => Arc::new(client),
                                     None => {
-                                        let _ = ups_w.write_all(&clt_buf[..n]).await;
                                         let _ = run_ftp_upload_audit_or_relay_bidi(
                                             clt_r, clt_w, ups_r, ups_w,
                                             ctx.idle_wheel.clone(),
@@ -200,7 +208,6 @@ where
                                     keylog_buffer: keylog_buffer.clone(),
                                 };
 
-                                let clt_r = io::Cursor::new(clt_buf[..n].to_vec()).chain(clt_r);
                                 let _ = run_ftp_upload_audit_or_relay_bidi(
                                     Box::new(clt_r),
                                     clt_w,
@@ -211,7 +218,6 @@ where
                                     Some(audit_ctx),
                                 ).await;
                             } else {
-                                let _ = ups_w.write_all(&clt_buf[..n]).await;
                                 let _ = run_ftp_upload_audit_or_relay_bidi(
                                     clt_r, clt_w, ups_r, ups_w,
                                     ctx.idle_wheel.clone(),

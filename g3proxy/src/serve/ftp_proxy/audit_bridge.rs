@@ -109,15 +109,38 @@ where
 }
 
 async fn bidi_half_relay_with_idle<R, W>(
-    mut r: R,
-    mut w: W,
+    r: R,
+    w: W,
     idle_wheel: Arc<IdleWheel>,
     max_idle_count: usize,
 )
 where
-    R: AsyncRead + Send + Sync + Unpin,
-    W: AsyncWrite + Send + Sync + Unpin,
+    R: AsyncRead + Send + Sync + Unpin + 'static,
+    W: AsyncWrite + Send + Sync + Unpin + 'static,
 {
+    // Decouple `r.read` from `w.write_all` so upstream backpressure on
+    // `w` cannot stall the reader. Previously this loop did
+    // `read -> write_all` serially in the same task; a slow upstream
+    // socket send buffer would block the await, the client read would
+    // stop, the kernel recv buffer on the client side would fill, and
+    // the client kernel would advertise TCP ZeroWindow. With large
+    // FTP uploads (>1 GiB) the client then stalled, retransmitted,
+    // and looped forever.
+    let (chunk_tx, chunk_rx) = flume::bounded::<bytes::Bytes>(8);
+
+    let writer = tokio::spawn(async move {
+        let mut w = w;
+        let mut rx = chunk_rx;
+        while let Ok(chunk) = rx.recv_async().await {
+            if w.write_all(&chunk).await.is_err() {
+                break;
+            }
+        }
+        let _ = w.flush().await;
+        let _ = w.shutdown().await;
+    });
+
+    let mut r = r;
     let mut idle_interval = idle_wheel.register();
     let mut idle_count = 0usize;
     let mut buf = vec![0u8; 32 * 1024];
@@ -130,7 +153,10 @@ where
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         idle_count = 0;
-                        if w.write_all(&buf[..n]).await.is_err() {
+                        let chunk = bytes::Bytes::copy_from_slice(&buf[..n]);
+                        if chunk_tx.send_async(chunk).await.is_err() {
+                            // writer task already exited (write error);
+                            // no point keeping the relay alive.
                             break;
                         }
                     }
@@ -145,8 +171,10 @@ where
             }
         }
     }
-    let _ = w.flush().await;
-    let _ = w.shutdown().await;
+    // Drop the sender so the writer task sees EOF and finalizes
+    // flush + shutdown of `w` once it has drained the channel.
+    drop(chunk_tx);
+    let _ = writer.await;
 }
 
 async fn raw_forward_with_idle<CR, UW>(
