@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use g3_dpi::Protocol;
 use g3_io_ext::{FlexBufReader, LimitedBufReadExt};
 use g3_slog_types::LtUuid;
+use g3_types::net::TlsKeyLogBuffer;
 
 use crate::config::server::ServerConfig;
 use crate::inspect::{
@@ -59,14 +60,16 @@ pub(crate) struct H1InterceptObject<SC: ServerConfig> {
     io: Option<H1InterceptIo>,
     ctx: StreamInspectContext<SC>,
     req_id: usize,
+    keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
 }
 
 impl<SC: ServerConfig> H1InterceptObject<SC> {
-    pub(crate) fn new(ctx: StreamInspectContext<SC>) -> Self {
+    pub(crate) fn new(ctx: StreamInspectContext<SC>, keylog_buffer: Option<Arc<TlsKeyLogBuffer>>) -> Self {
         H1InterceptObject {
             io: None,
             ctx,
             req_id: 0,
+            keylog_buffer,
         }
     }
 
@@ -175,7 +178,7 @@ where
                     return Err(e.into());
                 }
                 HttpRecvRequest::RequestWithoutIo(r) => {
-                    let mut forward_task = H1ForwardTask::new(self.ctx.clone(), &r, self.req_id);
+                    let mut forward_task = H1ForwardTask::new(self.ctx.clone(), &r, self.req_id, self.keylog_buffer.clone());
                     // not ICAP in this case
                     forward_task.forward_without_body(&mut rsp_io).await;
                     pipeline_stats.del_task();
@@ -206,7 +209,12 @@ where
                             pipeline_stats.del_task();
                         }
                     } else if r.inner.upgrade {
-                        let mut upgrade_task = H1UpgradeTask::new(self.ctx.clone(), r, self.req_id);
+                        let mut upgrade_task = H1UpgradeTask::new(
+                            self.ctx.clone(),
+                            r,
+                            self.req_id,
+                            self.keylog_buffer.clone(),
+                        );
                         let r = if let Some(reqmod_client) =
                             self.ctx.audit_handle.icap_reqmod_client()
                         {
@@ -230,7 +238,7 @@ where
                     } else {
                         /* added by wming for repid audit */
                         let mut forward_task 
-                            = H1ForwardTask::new(self.ctx.clone(), &r, self.req_id);
+                            = H1ForwardTask::new(self.ctx.clone(), &r, self.req_id, self.keylog_buffer.clone());
 
                         let cfg = self.ctx.h1_interception();
 

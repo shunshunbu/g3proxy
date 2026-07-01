@@ -1,6 +1,6 @@
 name: cds
 escaper: default
-auditor: https-uppayload
+auditor: https-up
 type: http_proxy
 #tls:
 #  certificate: cert.pem

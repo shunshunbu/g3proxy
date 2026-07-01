@@ -476,9 +476,11 @@ impl HttpProxyConnectTask {
         // For FTPS control channel, save the domain to global state
         // This domain will be used for data channel TLS certificate generation
         if is_ftps_control {
-            if let g3_types::net::Host::Domain(domain) = self.upstream.host() {
-                get_ftp_upload_state().mark_ftps_domain(client_ip, server_ip, domain);
-            }
+            let domain = match self.upstream.host() {
+                g3_types::net::Host::Domain(d) => d.to_string(),
+                g3_types::net::Host::Ip(ip) => ip.to_string(),
+            };
+            get_ftp_upload_state().mark_ftps_domain(client_ip, server_ip, &domain);
         }
 
         // Check if this is FTPS data channel by looking up the saved domain
@@ -525,6 +527,7 @@ impl HttpProxyConnectTask {
                             ftp_command: upload_info.ftp_command,
                             ftp_path: upload_info.ftp_path,
                             data_channel_tuple,
+                            keylog_buffer: None,
                         };
 
                         let _ = run_ftp_upload_audit_or_relay_bidi(
@@ -536,6 +539,39 @@ impl HttpProxyConnectTask {
                         .await;
                         return Ok(());
                     }
+                }
+            }
+        }
+
+        // For non-FTP traffic (including HTTPS), perform ICAP audit if configured
+        if !is_ftp_control && !is_ftps_data_channel {
+            if let Some(audit_handle) = self.audit_ctx.handle() {
+                let audit_task = self
+                    .task_notes
+                    .user_ctx()
+                    .map(|ctx| {
+                        let user_config = &ctx.user_config().audit;
+                        user_config.enable_protocol_inspection
+                            && user_config
+                                .do_task_audit()
+                                .unwrap_or_else(|| audit_handle.do_task_audit())
+                    })
+                    .unwrap_or_else(|| audit_handle.do_task_audit());
+
+                if audit_task {
+                    let ctx = StreamInspectContext::new(
+                        audit_handle.clone(),
+                        self.ctx.server_config.clone(),
+                        self.ctx.server_stats.clone(),
+                        self.ctx.server_quit_policy.clone(),
+                        self.ctx.idle_wheel.clone(),
+                        &self.task_notes,
+                        &self.tcp_notes,
+                    );
+                    return crate::inspect::stream::transit_with_inspection(
+                        clt_r, clt_w, ups_r, ups_w, ctx, self.upstream.clone(), None,
+                    )
+                    .await;
                 }
             }
         }

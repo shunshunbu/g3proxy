@@ -23,7 +23,9 @@ use g3_icap_client::reqmod::h1::{
 };
 use g3_io_ext::{LimitedWriteExt, OnceBufReader, StreamCopy, StreamCopyError};
 use g3_slog_types::{LtDateTime, LtDuration, LtHttpUri, LtUpstreamAddr, LtUuid};
-use g3_types::net::{HttpUpgradeToken, UpstreamAddr, WebSocketNotes};
+use std::sync::Arc;
+
+use g3_types::net::{HttpUpgradeToken, TlsKeyLogBuffer, UpstreamAddr, WebSocketNotes};
 
 use super::{H1InterceptionError, HttpRequest, HttpRequestIo, HttpResponseIo};
 use crate::config::server::ServerConfig;
@@ -96,13 +98,19 @@ pub(super) struct H1UpgradeTask<SC: ServerConfig> {
     should_close: bool,
     http_notes: HttpForwardTaskNotes,
     ws_notes: Option<WebSocketNotes>,
+    keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
 }
 
 impl<SC> H1UpgradeTask<SC>
 where
     SC: ServerConfig + Send + Sync + 'static,
 {
-    pub(super) fn new(ctx: StreamInspectContext<SC>, req: HttpRequest, req_id: usize) -> Self {
+    pub(super) fn new(
+        ctx: StreamInspectContext<SC>,
+        req: HttpRequest,
+        req_id: usize,
+        keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
+    ) -> Self {
         let http_notes = HttpForwardTaskNotes::new(req.datetime_received, req.time_received);
         H1UpgradeTask {
             ctx,
@@ -112,6 +120,7 @@ where
             should_close: false,
             http_notes,
             ws_notes: None,
+            keylog_buffer,
         }
     }
 
@@ -563,7 +572,11 @@ where
         match protocol {
             HttpUpgradeToken::Http(Version::HTTP_2) => {
                 StreamInspectLog::new(&ctx).log(InspectSource::HttpUpgrade, Protocol::Http2);
-                let mut h2_obj = crate::inspect::http::H2InterceptObject::new(ctx, upstream);
+                let mut h2_obj = crate::inspect::http::H2InterceptObject::new(
+                    ctx,
+                    upstream,
+                    self.keylog_buffer.clone(),
+                );
                 h2_obj.set_io(OnceBufReader::with_no_buf(clt_r), clt_w, ups_r, ups_w);
                 Ok(StreamInspection::H2(h2_obj))
             }

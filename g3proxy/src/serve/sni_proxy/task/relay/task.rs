@@ -240,7 +240,7 @@ impl TcpStreamTask {
                     }
                 }
                 Protocol::Http1 => {
-                    let mut h1_obj = crate::inspect::http::H1InterceptObject::new(ctx);
+                    let mut h1_obj = crate::inspect::http::H1InterceptObject::new(ctx, None);
                     h1_obj.set_io(
                         FlexBufReader::with_bytes(clt_r_buf, Box::new(clt_r)),
                         Box::new(clt_w),

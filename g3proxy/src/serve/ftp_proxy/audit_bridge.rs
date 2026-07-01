@@ -22,6 +22,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::task::JoinHandle;
 
 use g3_io_ext::{IdleWheel, IdleWheelChecker, StreamCopyConfig};
+use g3_types::net::TlsKeyLogBuffer;
 
 use crate::config::server::ServerConfig;
 
@@ -37,6 +38,8 @@ pub(crate) struct FtpUploadAuditContext {
     pub(crate) ftp_path: String,
     /// Data channel 5-tuple: (g3proxy local addr, FTP server addr)
     pub(crate) data_channel_tuple: Option<g3_icap_client::reqmod::ConnectionTuple>,
+    /// TLS keylog buffer for the upstream TLS connection
+    pub(crate) keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
 }
 
 /// Entry point for all FTP upload data channels.
@@ -240,6 +243,10 @@ where
     if let Some(tuple) = audit_ctx.data_channel_tuple {
         adapter.set_connection_tuple(tuple);
     }
+    /* added for TLS keylog */
+    if let Some(keylog) = audit_ctx.keylog_buffer {
+        adapter.set_keylog_buffer(keylog);
+    }
 
     let mut state = g3_icap_client::reqmod::ftp::new_adaptation_run_state();
     let end_state = adapter
@@ -270,6 +277,7 @@ pub(crate) fn build_audit_context(
     ftp_command: &str,
     ftp_path: &str,
     data_channel_tuple: Option<g3_icap_client::reqmod::ConnectionTuple>,
+    keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
 ) -> Option<FtpUploadAuditContext> {
     let icap_client = ctx.icap_client.as_ref()?.clone();
 
@@ -281,5 +289,6 @@ pub(crate) fn build_audit_context(
         ftp_command: ftp_command.to_string(),
         ftp_path: ftp_path.to_string(),
         data_channel_tuple,
+        keylog_buffer,
     })
 }

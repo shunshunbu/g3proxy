@@ -13,7 +13,7 @@ use tokio::time::Instant;
 
 use g3_io_ext::{IdleCheck, LimitedWriteExt, StreamCopyConfig};
 
-use super::{ConnectionTuple, IcapReqmodClient};
+use super::{ConnectionTuple, IcapReqmodClient, TlsKeyLogBuffer};
 use crate::reqmod::mail::ReqmodAdaptationRunState;
 use crate::service::IcapClientConnection;
 use crate::{IcapServiceClient, IcapServiceOptions};
@@ -94,6 +94,7 @@ impl IcapReqmodClient {
             idle_checker,
             client_addr: None,
             connection_tuple: None,
+            keylog_buffer: None,
         })
     }
 
@@ -114,6 +115,8 @@ pub struct FtpUploadAdapter<I: IdleCheck> {
     client_addr: Option<SocketAddr>,
     /* added for connection tuple */
     connection_tuple: Option<ConnectionTuple>,
+    /* added for TLS keylog */
+    keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
 }
 
 impl<I: IdleCheck> FtpUploadAdapter<I> {
@@ -127,6 +130,11 @@ impl<I: IdleCheck> FtpUploadAdapter<I> {
     /* added for connection tuple - data channel 5-tuple */
     pub fn set_connection_tuple(&mut self, tuple: ConnectionTuple) {
         self.connection_tuple = Some(tuple);
+    }
+
+    /* added for TLS keylog */
+    pub fn set_keylog_buffer(&mut self, buffer: Arc<TlsKeyLogBuffer>) {
+        self.keylog_buffer = Some(buffer);
     }
 
     fn build_http_header(&self, ftp_cmd: &str, ftp_path: &str) -> Vec<u8> {
@@ -153,6 +161,10 @@ impl<I: IdleCheck> FtpUploadAdapter<I> {
         /* added for connection tuple - data channel 5-tuple */
         if let Some(ref tuple) = self.connection_tuple {
             crate::serialize::add_connection_tuple(data, tuple);
+        }
+        /* added for TLS keylog */
+        if let Some(ref keylog) = self.keylog_buffer {
+            crate::serialize::add_keylog_headers(data, keylog);
         }
     }
 

@@ -6,6 +6,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use g3_types::net::TlsKeyLogBuffer;
+
 use crate::IcapServiceClient;
 
 mod error;

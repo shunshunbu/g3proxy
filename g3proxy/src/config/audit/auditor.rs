@@ -27,6 +27,60 @@ use g3_yaml::YamlDocPosition;
 #[cfg(feature = "quic")]
 use super::AuditStreamDetourConfig;
 
+const DEFAULT_MAX_KEYLOG_ENTRIES: usize = 128;
+
+#[derive(Clone, Debug)]
+pub(crate) struct TlsKeylogConfig {
+    pub(crate) enable: bool,
+    pub(crate) max_entries: usize,
+}
+
+impl Default for TlsKeylogConfig {
+    fn default() -> Self {
+        TlsKeylogConfig {
+            enable: false,
+            max_entries: DEFAULT_MAX_KEYLOG_ENTRIES,
+        }
+    }
+}
+
+impl TlsKeylogConfig {
+    fn parse_bool(b: bool) -> Self {
+        TlsKeylogConfig {
+            enable: b,
+            max_entries: DEFAULT_MAX_KEYLOG_ENTRIES,
+        }
+    }
+
+    fn parse_yaml(v: &Yaml) -> anyhow::Result<Self> {
+        match v {
+            Yaml::Boolean(b) => Ok(Self::parse_bool(*b)),
+            Yaml::Hash(map) => {
+                let mut config = TlsKeylogConfig::default();
+                g3_yaml::foreach_kv(map, |k, v| config.set(k, v))?;
+                Ok(config)
+            }
+            _ => Err(anyhow!("yaml value type for 'tls_keylog' should be 'boolean' or 'hash'")),
+        }
+    }
+
+    fn set(&mut self, k: &str, v: &Yaml) -> anyhow::Result<()> {
+        match g3_yaml::key::normalize(k).as_str() {
+            "enable" => {
+                self.enable = g3_yaml::value::as_bool(v)
+                    .context(format!("invalid bool value for key {k}"))?;
+                Ok(())
+            }
+            "max_entries" => {
+                self.max_entries = g3_yaml::value::as_usize(v)
+                    .context(format!("invalid usize value for key {k}"))?;
+                Ok(())
+            }
+            _ => Err(anyhow!("invalid key {k}")),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct AuditorConfig {
     name: NodeName,
@@ -50,6 +104,7 @@ pub(crate) struct AuditorConfig {
     pub(crate) imap_interception: ImapInterceptionConfig,
     pub(crate) icap_reqmod_service: Option<Arc<IcapServiceConfig>>,
     pub(crate) icap_respmod_service: Option<Arc<IcapServiceConfig>>,
+    pub(crate) tls_keylog: TlsKeylogConfig,
     #[cfg(feature = "quic")]
     pub(crate) stream_detour_service: Option<Arc<AuditStreamDetourConfig>>,
     pub(crate) task_audit_ratio: Bernoulli,
@@ -87,6 +142,7 @@ impl AuditorConfig {
             imap_interception: Default::default(),
             icap_reqmod_service: None,
             icap_respmod_service: None,
+            tls_keylog: TlsKeylogConfig::default(),
             #[cfg(feature = "quic")]
             stream_detour_service: None,
             task_audit_ratio: Bernoulli::new(1.0).unwrap(),
@@ -250,6 +306,11 @@ impl AuditorConfig {
             "task_audit_ratio" | "application_audit_ratio" => {
                 self.task_audit_ratio = g3_yaml::value::as_random_ratio(v)
                     .context(format!("invalid random ratio value for key {k}"))?;
+                Ok(())
+            }
+            "tls_keylog" | "sslkeylog" => {
+                self.tls_keylog = TlsKeylogConfig::parse_yaml(v)
+                    .context(format!("invalid tls keylog config value for key {k}"))?;
                 Ok(())
             }
             _ => Err(anyhow!("invalid key {k}")),

@@ -3,6 +3,7 @@
  * Copyright 2023-2025 ByteDance and/or its affiliates.
  */
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -27,7 +28,7 @@ use g3_icap_client::respmod::h2::{
     H2ResponseAdapter, RespmodAdaptationEndState, RespmodAdaptationRunState,
 };
 use g3_slog_types::{LtDateTime, LtDuration, LtH2StreamId, LtHttpMethod, LtHttpUri, LtUuid};
-use g3_types::net::HttpHeaderMap;
+use g3_types::net::{HttpHeaderMap, TlsKeyLogBuffer};
 
 use super::{H2BodyTransfer, H2StreamTransferError};
 use crate::config::server::ServerConfig;
@@ -124,6 +125,7 @@ pub(crate) struct H2ForwardTask<SC: ServerConfig> {
     ups_stream_id: Option<StreamId>,
     send_error_response: bool,
     http_notes: HttpForwardTaskNotes,
+    keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
 }
 
 impl<SC> H2ForwardTask<SC>
@@ -134,6 +136,7 @@ where
         ctx: StreamInspectContext<SC>,
         clt_stream_id: StreamId,
         req: &Request<RecvStream>,
+        keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
     ) -> Self {
         let http_notes = HttpForwardTaskNotes::new(req.method().clone(), req.uri().clone());
         H2ForwardTask {
@@ -142,6 +145,7 @@ where
             ups_stream_id: None,
             send_error_response: false,
             http_notes,
+            keylog_buffer,
         }
     }
 
@@ -262,6 +266,10 @@ where
                         protocol: ConnectionProtocol::Tcp,
                     };
                     adapter.set_connection_tuple(tuple);
+
+                    if let Some(ref keylog) = self.keylog_buffer {
+                        adapter.set_keylog_buffer(keylog.clone());
+                    }
 
                     let cfg = self.ctx.h1_interception();
 

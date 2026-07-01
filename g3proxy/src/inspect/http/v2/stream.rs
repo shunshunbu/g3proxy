@@ -4,6 +4,7 @@
  */
 
 use std::str::FromStr;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use h2::RecvStream;
@@ -12,7 +13,7 @@ use h2::ext::Protocol;
 use h2::server::SendResponse;
 use http::{Method, Request};
 
-use g3_types::net::HttpUpgradeToken;
+use g3_types::net::{HttpUpgradeToken, TlsKeyLogBuffer};
 
 use super::{H2ConnectTask, H2ExtendedConnectTask, H2ForwardTask};
 use crate::config::server::ServerConfig;
@@ -23,6 +24,7 @@ pub(super) async fn transfer<SC>(
     clt_send_rsp: SendResponse<Bytes>,
     h2s: SendRequest<Bytes>,
     ctx: StreamInspectContext<SC>,
+    keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
 ) where
     SC: ServerConfig + Send + Sync + 'static,
 {
@@ -43,7 +45,7 @@ pub(super) async fn transfer<SC>(
             connect_task.into_running(clt_req, clt_send_rsp, h2s).await
         };
     } else {
-        let forward_task = H2ForwardTask::new(ctx, clt_stream_id, &clt_req);
+        let forward_task = H2ForwardTask::new(ctx, clt_stream_id, &clt_req, keylog_buffer);
         forward_task.forward(clt_req, clt_send_rsp, h2s).await
     }
 }

@@ -18,7 +18,7 @@ use g3_dpi::{Protocol, ProtocolInspectAction};
 use g3_h2::H2BodyTransfer;
 use g3_io_ext::{IdleInterval, OnceBufReader, StreamCopyConfig};
 use g3_slog_types::{LtUpstreamAddr, LtUuid};
-use g3_types::net::UpstreamAddr;
+use g3_types::net::{TlsKeyLogBuffer, UpstreamAddr};
 
 #[cfg(feature = "quic")]
 use crate::audit::DetourAction;
@@ -74,16 +74,22 @@ pub(crate) struct H2InterceptObject<SC: ServerConfig> {
     ctx: StreamInspectContext<SC>,
     stats: Arc<H2ConcurrencyStats>,
     upstream: UpstreamAddr,
+    keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
 }
 
 impl<SC: ServerConfig> H2InterceptObject<SC> {
-    pub(crate) fn new(ctx: StreamInspectContext<SC>, upstream: UpstreamAddr) -> Self {
+    pub(crate) fn new(
+        ctx: StreamInspectContext<SC>,
+        upstream: UpstreamAddr,
+        keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
+    ) -> Self {
         let stats = Arc::new(H2ConcurrencyStats::default());
         H2InterceptObject {
             io: None,
             ctx,
             stats,
             upstream,
+            keylog_buffer,
         }
     }
 
@@ -434,9 +440,11 @@ where
                             let h2s = h2s.clone();
                             let ctx = self.ctx.clone();
                             let stats = self.stats.clone();
+                            let keylog_buffer = self.keylog_buffer.clone();
                             stats.add_task();
                             tokio::spawn(async move {
-                                stream::transfer(clt_req, clt_send_rsp, h2s, ctx).await;
+                                stream::transfer(clt_req, clt_send_rsp, h2s, ctx, keylog_buffer)
+                                    .await;
                                 stats.del_task();
                             });
                             continue;

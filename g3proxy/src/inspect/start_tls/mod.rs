@@ -7,10 +7,12 @@ use bytes::BytesMut;
 use openssl::x509::X509VerifyResult;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use std::sync::Arc;
+
 use g3_dpi::Protocol;
 use g3_io_ext::{AsyncStream, OnceBufReader};
 use g3_slog_types::{LtUpstreamAddr, LtUuid, LtX509VerifyResult};
-use g3_types::net::{TlsServiceType, UpstreamAddr};
+use g3_types::net::{TlsKeyLogBuffer, TlsServiceType, UpstreamAddr};
 use g3_udpdump::{ExportedPduDissectorHint, StreamDumpProxyAddresses};
 
 #[cfg(not(feature = "vendored-tongsuo"))]
@@ -86,6 +88,7 @@ pub(crate) struct StartTlsInterceptObject<SC: ServerConfig> {
     tls_interception: TlsInterceptionContext,
     protocol: StartTlsProtocol,
     server_verify_result: Option<X509VerifyResult>,
+    keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
 }
 
 impl<SC> StartTlsInterceptObject<SC>
@@ -105,6 +108,7 @@ where
             tls_interception: tls,
             protocol,
             server_verify_result: None,
+            keylog_buffer: None,
         }
     }
 

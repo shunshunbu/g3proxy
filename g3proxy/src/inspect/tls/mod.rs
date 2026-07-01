@@ -21,7 +21,7 @@ use g3_io_ext::{AsyncStream, FlexBufReader, OnceBufReader};
 use g3_slog_types::{LtUpstreamAddr, LtUuid, LtX509VerifyResult};
 use g3_types::net::{
     AlpnProtocol, OpensslInterceptionClientConfig, OpensslInterceptionServerConfig, TlsAlpn,
-    TlsServerName, UpstreamAddr,
+    TlsKeyLogBuffer, TlsServerName, UpstreamAddr,
 };
 use g3_udpdump::{
     ExportedPduDissectorHint, StreamDumpConfig, StreamDumpProxyAddresses, StreamDumper,
@@ -229,6 +229,8 @@ pub(crate) struct TlsInterceptObject<SC: ServerConfig> {
     upstream: UpstreamAddr,
     tls_interception: TlsInterceptionContext,
     server_verify_result: Option<X509VerifyResult>,
+    /// TLS keylog buffer for the upstream TLS connection
+    keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
 }
 
 macro_rules! intercept_log {
@@ -257,6 +259,7 @@ impl<SC: ServerConfig> TlsInterceptObject<SC> {
             upstream,
             tls_interception: tls,
             server_verify_result: None,
+            keylog_buffer: None,
         }
     }
 
@@ -482,7 +485,7 @@ where
         match protocol {
             Protocol::Http1 => {
                 let ctx = self.prepare_ctx(protocol);
-                let mut h1_obj = crate::inspect::http::H1InterceptObject::new(ctx);
+                let mut h1_obj = crate::inspect::http::H1InterceptObject::new(ctx, self.keylog_buffer.clone());
                 h1_obj.set_io(
                     FlexBufReader::new(Box::new(clt_r)),
                     Box::new(clt_w),
@@ -493,8 +496,11 @@ where
             }
             Protocol::Http2 => {
                 let ctx = self.prepare_ctx(protocol);
-                let mut h2_obj =
-                    crate::inspect::http::H2InterceptObject::new(ctx, self.upstream.clone());
+                let mut h2_obj = crate::inspect::http::H2InterceptObject::new(
+                    ctx,
+                    self.upstream.clone(),
+                    self.keylog_buffer.clone(),
+                );
                 h2_obj.set_io(
                     OnceBufReader::with_no_buf(Box::new(clt_r)),
                     Box::new(clt_w),
@@ -556,6 +562,7 @@ where
                             ctx,
                             upload_info,
                             data_channel_tuple,
+                            self.keylog_buffer.clone(),
                         );
                     ftp_upload_obj.set_io(
                         Box::new(clt_r),

@@ -29,3 +29,6 @@ pub use version::TlsVersion;
 
 mod alert;
 pub use alert::{TlsAlert, TlsAlertType};
+
+mod keylog;
+pub use keylog::{TlsKeyLogBuffer, TlsKeyLogEntry};

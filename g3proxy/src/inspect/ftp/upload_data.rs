@@ -14,6 +14,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use g3_icap_client::reqmod::{ConnectionProtocol, ConnectionTuple};
+use g3_types::net::TlsKeyLogBuffer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::config::server::ServerConfig;
@@ -36,6 +37,7 @@ pub(crate) struct FtpUploadDataInterceptObject<SC: ServerConfig> {
     ctx: StreamInspectContext<SC>,
     upload_info: Option<PendingUploadInfo>,
     data_channel_tuple: Option<ConnectionTuple>,
+    keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
 }
 
 impl<SC: ServerConfig> FtpUploadDataInterceptObject<SC> {
@@ -43,12 +45,14 @@ impl<SC: ServerConfig> FtpUploadDataInterceptObject<SC> {
         ctx: StreamInspectContext<SC>,
         upload_info: PendingUploadInfo,
         data_channel_tuple: Option<ConnectionTuple>,
+        keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
     ) -> Self {
         FtpUploadDataInterceptObject {
             io: None,
             ctx,
             upload_info: Some(upload_info),
             data_channel_tuple,
+            keylog_buffer,
         }
     }
 
@@ -81,7 +85,7 @@ where
 
         let upload_info = match self.upload_info.take() {
             Some(info) => info,
-            None => return Self::intercept_pending(self.ctx, io).await,
+            None => return Self::intercept_pending(self.ctx, io, self.keylog_buffer).await,
         };
 
         let icap_client = match self.ctx.audit_handle.icap_reqmod_client().cloned() {
@@ -105,6 +109,7 @@ where
             ftp_command: upload_info.ftp_command,
             ftp_path: upload_info.ftp_path,
             data_channel_tuple: self.data_channel_tuple,
+            keylog_buffer: self.keylog_buffer.clone(),
         };
 
         let _ = run_ftp_upload_audit_or_relay_bidi(
@@ -123,6 +128,7 @@ where
     async fn intercept_pending(
         ctx: StreamInspectContext<SC>,
         io: FtpUploadDataIo,
+        keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
     ) -> ServerTaskResult<()> {
         let FtpUploadDataIo {
             clt_r,
@@ -191,6 +197,7 @@ where
                                     ftp_command: upload_info.ftp_command,
                                     ftp_path: upload_info.ftp_path,
                                     data_channel_tuple: Some(data_channel_tuple),
+                                    keylog_buffer: keylog_buffer.clone(),
                                 };
 
                                 let clt_r = io::Cursor::new(clt_buf[..n].to_vec()).chain(clt_r);

@@ -69,6 +69,21 @@ impl From<TlsVersion> for SslVersion {
     }
 }
 
+#[cfg(feature = "openssl")]
+impl TryFrom<SslVersion> for TlsVersion {
+    type Error = anyhow::Error;
+
+    fn try_from(value: SslVersion) -> Result<Self, Self::Error> {
+        match value {
+            SslVersion::TLS1 => Ok(TlsVersion::TLS1_0),
+            SslVersion::TLS1_1 => Ok(TlsVersion::TLS1_1),
+            SslVersion::TLS1_2 => Ok(TlsVersion::TLS1_2),
+            SslVersion::TLS1_3 => Ok(TlsVersion::TLS1_3),
+            _ => Err(anyhow!("unsupported SSL version {:?}", value)),
+        }
+    }
+}
+
 impl fmt::Display for TlsVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())

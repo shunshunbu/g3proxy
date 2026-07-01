@@ -3,6 +3,7 @@
  * Copyright 2023-2025 ByteDance and/or its affiliates.
  */
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -26,6 +27,7 @@ use g3_icap_client::reqmod::h1::{
 use g3_icap_client::respmod::h1::{
     HttpResponseAdapter, RespmodAdaptationEndState, RespmodAdaptationRunState,
 };
+use g3_types::net::TlsKeyLogBuffer;
 use g3_io_ext::{LimitedBufReadExt, LimitedWriteExt, StreamCopy, StreamCopyError};
 use g3_slog_types::{LtDateTime, LtDuration, LtHttpHeaderValue, LtHttpMethod, LtHttpUri, LtUuid};
 use g3_types::net::HttpHeaderMap;
@@ -123,10 +125,16 @@ pub(super) struct H1ForwardTask<'a, SC: ServerConfig> {
     send_error_response: bool,
     should_close: bool,
     http_notes: HttpForwardTaskNotes,
+    keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
 }
 
 impl<'a, SC: ServerConfig> H1ForwardTask<'a, SC> {
-    pub(super) fn new(ctx: StreamInspectContext<SC>, req: &'a HttpRequest, req_id: usize) -> Self {
+    pub(super) fn new(
+        ctx: StreamInspectContext<SC>,
+        req: &'a HttpRequest,
+        req_id: usize,
+        keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
+    ) -> Self {
         let http_notes = HttpForwardTaskNotes::new(req.datetime_received, req.time_received);
         let should_close = !req.inner.keep_alive();
         H1ForwardTask {
@@ -136,6 +144,7 @@ impl<'a, SC: ServerConfig> H1ForwardTask<'a, SC> {
             send_error_response: true,
             should_close,
             http_notes,
+            keylog_buffer,
         }
     }
 
@@ -220,6 +229,9 @@ impl<'a, SC: ServerConfig> H1ForwardTask<'a, SC> {
                     protocol: ConnectionProtocol::Tcp,
                 };
                 adapter.set_connection_tuple(tuple);
+                if let Some(ref keylog) = self.keylog_buffer {
+                    adapter.set_keylog_buffer(keylog.clone());
+                }
 
 
                 adapter

@@ -492,7 +492,7 @@ async fn handle_upload_data_channel<CW, UR>(
         protocol: g3_icap_client::reqmod::ConnectionProtocol::Tcp,
     };
 
-    let audit_ctx = build_audit_context(ctx, &cmd, &path, Some(data_tuple));
+    let audit_ctx = build_audit_context(ctx, &cmd, &path, Some(data_tuple), None);
 
     let _ = run_ftp_upload_audit_or_relay(
         &mut clt_conn,

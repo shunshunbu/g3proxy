@@ -11,7 +11,7 @@ use openssl::ssl::Ssl;
 use g3_dpi::{Protocol, ProtocolInspector};
 use g3_io_ext::OnceBufReader;
 use g3_openssl::{SslAcceptor, SslConnector};
-use g3_types::net::{AlpnProtocol, Host, TlsCertUsage, TlsServiceType};
+use g3_types::net::{AlpnProtocol, Host, TlsCertUsage, TlsKeyLogBuffer, TlsServiceType, TlsVersion};
 
 use super::{ParsedClientHello, TlsInterceptIo, TlsInterceptObject, TlsInterceptionError};
 use crate::config::server::ServerConfig;
@@ -62,6 +62,13 @@ where
                 new_ext
             }
         });
+        let keylog_buffer = if self.ctx.audit_handle.tls_keylog() {
+            Some(Arc::new(TlsKeyLogBuffer::new_with_max(
+                self.ctx.audit_handle.tls_keylog_max_entries(),
+            )))
+        } else {
+            None
+        };
         let ups_ssl = match self.ctx.user_site_tls_client() {
             Some(c) => c
                 .build_mimic_ssl(sni_hostname, &self.upstream, alpn_ext.as_ref())
@@ -73,13 +80,14 @@ where
             None => self
                 .tls_interception
                 .client_config
-                .build_ssl(sni_hostname, &self.upstream, alpn_ext.as_ref())
+                .build_ssl(sni_hostname, &self.upstream, alpn_ext.as_ref(), keylog_buffer.clone())
                 .map_err(|e| {
                     TlsInterceptionError::UpstreamPrepareFailed(anyhow!(
                         "failed to build general ssl context: {e}"
                     ))
                 })?,
         };
+        self.keylog_buffer = keylog_buffer;
 
         // fetch fake server cert early in the background
         // Use FTPS domain if available, otherwise use SNI or upstream hostname
@@ -118,6 +126,23 @@ where
         .map_err(|e| {
             TlsInterceptionError::UpstreamHandshakeFailed(anyhow!("upstream handshake error: {e}"))
         })?;
+
+        if let Some(buf) = &self.keylog_buffer {
+            if let Some(ssl_version) = ups_tls_stream.ssl().version2() {
+                if let Ok(version) = TlsVersion::try_from(ssl_version) {
+                    buf.set_tls_version(version);
+                }
+            }
+            if let Some(cipher) = ups_tls_stream.ssl().current_cipher() {
+                let cipher_id = u16::from_be_bytes(cipher.protocol_id());
+                buf.set_cipher_suite(cipher_id);
+            }
+            let mut random_buf = [0u8; 32];
+            let random_len = ups_tls_stream.ssl().server_random(&mut random_buf);
+            if random_len > 0 {
+                buf.set_server_random(hex::encode(&random_buf[..random_len]));
+            }
+        }
 
         let pre_fetch_pair = pre_fetch_handle.await.map_err(|e| {
             TlsInterceptionError::NoFakeCertGenerated(anyhow!(

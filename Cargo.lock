@@ -1895,6 +1895,7 @@ dependencies = [
  "g3proxy-proto",
  "governor",
  "h2",
+ "hex",
  "http",
  "indexmap",
  "ip_network",

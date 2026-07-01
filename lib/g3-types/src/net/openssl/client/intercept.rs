@@ -3,10 +3,12 @@
  * Copyright 2023-2025 ByteDance and/or its affiliates.
  */
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
 use log::warn;
+use openssl::ex_data::Index;
 use openssl::ssl::{Ssl, SslConnector, SslContext, SslContextBuilder, SslMethod, SslVerifyMode};
 use openssl::x509::X509;
 use openssl::x509::store::X509StoreBuilder;
@@ -15,12 +17,13 @@ use super::{
     DEFAULT_HANDSHAKE_TIMEOUT, MINIMAL_HANDSHAKE_TIMEOUT, OpensslClientSessionCache,
     OpensslSessionCacheConfig,
 };
-use crate::net::{TlsAlpn, TlsServerName, TlsVersion, UpstreamAddr};
+use crate::net::{TlsAlpn, TlsKeyLogBuffer, TlsKeyLogEntry, TlsServerName, TlsVersion, UpstreamAddr};
 
 #[derive(Clone)]
 struct ContextPair {
     ssl_context: SslContext,
     session_cache: Option<OpensslClientSessionCache>,
+    keylog_index: Index<Ssl, Arc<TlsKeyLogBuffer>>,
 }
 
 impl ContextPair {
@@ -29,6 +32,7 @@ impl ContextPair {
         server_name: Option<&TlsServerName>,
         upstream: &UpstreamAddr,
         alpn_ext: Option<&TlsAlpn>,
+        keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
     ) -> anyhow::Result<Ssl> {
         let mut ssl =
             Ssl::new(&self.ssl_context).map_err(|e| anyhow!("failed to get new Ssl state: {e}"))?;
@@ -46,6 +50,9 @@ impl ContextPair {
         if let Some(v) = alpn_ext {
             ssl.set_alpn_protos(v.wired_list_sequence())
                 .map_err(|e| anyhow!("failed to set alpn protocols: {e}"))?;
+        }
+        if let Some(buf) = keylog_buffer {
+            ssl.set_ex_data(self.keylog_index, buf);
         }
         Ok(ssl)
     }
@@ -66,9 +73,10 @@ impl OpensslInterceptionClientConfig {
         server_name: Option<&TlsServerName>,
         upstream: &UpstreamAddr,
         alpn_ext: Option<&TlsAlpn>,
+        keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
     ) -> anyhow::Result<Ssl> {
         self.ssl_context_pair
-            .build_ssl(server_name, upstream, alpn_ext)
+            .build_ssl(server_name, upstream, alpn_ext, keylog_buffer)
     }
 
     #[cfg(tongsuo)]
@@ -77,9 +85,10 @@ impl OpensslInterceptionClientConfig {
         server_name: Option<&TlsServerName>,
         upstream: &UpstreamAddr,
         alpn_ext: Option<&TlsAlpn>,
+        keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
     ) -> anyhow::Result<Ssl> {
         self.tlcp_context_pair
-            .build_ssl(server_name, upstream, alpn_ext)
+            .build_ssl(server_name, upstream, alpn_ext, keylog_buffer)
     }
 }
 
@@ -295,7 +304,10 @@ impl OpensslInterceptionClientConfigBuilder {
     }
 
     #[cfg(any(awslc, boringssl))]
-    fn build_ssl_context(&self) -> anyhow::Result<ContextPair> {
+    fn build_ssl_context(
+        &self,
+        keylog_index: Index<Ssl, Arc<TlsKeyLogBuffer>>,
+    ) -> anyhow::Result<ContextPair> {
         let mut ctx_builder = SslConnector::builder(SslMethod::tls_client())
             .map_err(|e| anyhow!("failed to create ssl context builder: {e}"))?;
 
@@ -332,14 +344,20 @@ impl OpensslInterceptionClientConfigBuilder {
 
         let session_cache = self.session_cache.set_for_client(&mut ctx_builder)?;
 
+        Self::set_keylog_callback(&mut ctx_builder, keylog_index);
+
         Ok(ContextPair {
             ssl_context: ctx_builder.build().into_context(),
             session_cache,
+            keylog_index,
         })
     }
 
     #[cfg(libressl)]
-    fn build_ssl_context(&self) -> anyhow::Result<ContextPair> {
+    fn build_ssl_context(
+        &self,
+        keylog_index: Index<Ssl, Arc<TlsKeyLogBuffer>>,
+    ) -> anyhow::Result<ContextPair> {
         use openssl::ssl::StatusType;
 
         let mut ctx_builder = SslConnector::builder(SslMethod::tls_client())
@@ -366,14 +384,20 @@ impl OpensslInterceptionClientConfigBuilder {
 
         let session_cache = self.session_cache.set_for_client(&mut ctx_builder)?;
 
+        Self::set_keylog_callback(&mut ctx_builder, keylog_index);
+
         Ok(ContextPair {
             ssl_context: ctx_builder.build().into_context(),
             session_cache,
+            keylog_index,
         })
     }
 
     #[cfg(not(any(awslc, boringssl, libressl)))]
-    fn build_ssl_context(&self) -> anyhow::Result<ContextPair> {
+    fn build_ssl_context(
+        &self,
+        keylog_index: Index<Ssl, Arc<TlsKeyLogBuffer>>,
+    ) -> anyhow::Result<ContextPair> {
         use openssl::ssl::{SslCtValidationMode, StatusType};
 
         let mut ctx_builder = SslConnector::builder(SslMethod::tls_client())
@@ -409,14 +433,20 @@ impl OpensslInterceptionClientConfigBuilder {
 
         let session_cache = self.session_cache.set_for_client(&mut ctx_builder)?;
 
+        Self::set_keylog_callback(&mut ctx_builder, keylog_index);
+
         Ok(ContextPair {
             ssl_context: ctx_builder.build().into_context(),
             session_cache,
+            keylog_index,
         })
     }
 
     #[cfg(tongsuo)]
-    fn build_tlcp_context(&self) -> anyhow::Result<ContextPair> {
+    fn build_tlcp_context(
+        &self,
+        keylog_index: Index<Ssl, Arc<TlsKeyLogBuffer>>,
+    ) -> anyhow::Result<ContextPair> {
         use openssl::ssl::{SslCtValidationMode, StatusType};
 
         let mut ctx_builder = SslConnector::builder(SslMethod::ntls_client())
@@ -449,19 +479,37 @@ impl OpensslInterceptionClientConfigBuilder {
 
         let session_cache = self.session_cache.set_for_client(&mut ctx_builder)?;
 
+        Self::set_keylog_callback(&mut ctx_builder, keylog_index);
+
         Ok(ContextPair {
             ssl_context: ctx_builder.build().into_context(),
             session_cache,
+            keylog_index,
         })
     }
 
     pub fn build(&self) -> anyhow::Result<OpensslInterceptionClientConfig> {
+        let keylog_index = Ssl::new_ex_index::<Arc<TlsKeyLogBuffer>>()
+            .map_err(|e| anyhow!("failed to create ssl ex index for keylog: {e}"))?;
         Ok(OpensslInterceptionClientConfig {
-            ssl_context_pair: self.build_ssl_context()?,
+            ssl_context_pair: self.build_ssl_context(keylog_index)?,
             #[cfg(tongsuo)]
-            tlcp_context_pair: self.build_tlcp_context()?,
+            tlcp_context_pair: self.build_tlcp_context(keylog_index)?,
             insecure: self.insecure,
             handshake_timeout: self.handshake_timeout,
         })
+    }
+
+    fn set_keylog_callback(
+        ctx_builder: &mut SslContextBuilder,
+        keylog_index: Index<Ssl, Arc<TlsKeyLogBuffer>>,
+    ) {
+        ctx_builder.set_keylog_callback(move |ssl, line| {
+            if let Some(buffer) = ssl.ex_data(keylog_index) {
+                if let Some(entry) = TlsKeyLogEntry::parse(line) {
+                    let _ = buffer.add_entry(entry);
+                }
+            }
+        });
     }
 }

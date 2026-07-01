@@ -1,13 +1,20 @@
-name: https-uppayload
+name: https-up
 protocol_inspection: { }
 			
 tls_cert_generator: { }
 tls_interception_client: { } # 代理对目标地址TLS连接参数
 tls_ticketer: { }
+
+tls_keylog:
+    enable: true
+    max_entries: 100
+	
 h1_interception:
     req_hasbody: true
     req_body_min_size: 8
-#h2_interception: { } 
+	
+h2_interception: { } 
+
 application_audit_ratio: 1.0
 
 # tls_stream_dump: { }

@@ -275,6 +275,15 @@ where
         let client_ip = self.ctx.task_notes.client_addr.ip();
         let ftp_server_ip = self.ctx.connect_notes.server_addr.ip();
 
+        if self.from_starttls {
+            let domain = match self.upstream.host() {
+                g3_types::net::Host::Domain(d) => d.to_string(),
+                g3_types::net::Host::Ip(ip) => ip.to_string(),
+            };
+            crate::serve::ftp_proxy::upload_state::get_ftp_upload_state()
+                .mark_ftps_domain(client_ip, ftp_server_ip, &domain);
+        }
+
         let mut idle_interval = self.idle_check_interval();
         let mut idle_count = 0usize;
         let max_idle_count = self

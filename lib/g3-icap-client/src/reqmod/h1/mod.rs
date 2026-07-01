@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::BufMut;
 use http::Method;
 use tokio::io::{AsyncBufRead, AsyncWrite};
 use tokio::time::Instant;
@@ -16,6 +17,7 @@ use g3_http::server::HttpAdaptedRequest;
 use g3_http::{HttpBodyReader, HttpBodyType};
 use g3_io_ext::{IdleCheck, StreamCopyConfig};
 use g3_types::net::HttpHeaderMap;
+use g3_types::net::TlsKeyLogBuffer;
 
 use super::{ConnectionTuple, IcapReqmodClient};
 use crate::{IcapClientConnection, IcapServiceClient, IcapServiceOptions};
@@ -74,6 +76,7 @@ impl IcapReqmodClient {
             client_username: None,
             /* added by wming for repid audit */
             connection_tuple: None,
+            keylog_buffer: None,
         })
     }
 }
@@ -90,6 +93,7 @@ pub struct HttpRequestAdapter<I: IdleCheck> {
     client_username: Option<Arc<str>>,
     /* added by wming for repid audit */
     connection_tuple: Option<ConnectionTuple>,
+    keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
 }
 
 pub struct ReqmodAdaptationRunState {
@@ -146,7 +150,12 @@ impl<I: IdleCheck> HttpRequestAdapter<I> {
         self.connection_tuple = Some(tuple);
     }
 
+    pub fn set_keylog_buffer(&mut self, buffer: Arc<TlsKeyLogBuffer>) {
+        self.keylog_buffer = Some(buffer);
+    }
+
     fn push_extended_headers(&self, data: &mut Vec<u8>) {
+        data.put_slice(b"X-Transformed-From: HTTP/1.0\r\n");
         if let Some(addr) = self.client_addr {
             crate::serialize::add_client_addr(data, addr);
         }
@@ -156,6 +165,9 @@ impl<I: IdleCheck> HttpRequestAdapter<I> {
         /* added by wming for repid audit */
         if let Some(ref tuple) = self.connection_tuple {
             crate::serialize::add_connection_tuple(data, tuple);
+        }
+        if let Some(ref keylog) = self.keylog_buffer {
+            crate::serialize::add_keylog_headers(data, keylog);
         }
     }
 

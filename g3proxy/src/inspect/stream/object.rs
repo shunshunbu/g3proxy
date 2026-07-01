@@ -172,7 +172,7 @@ where
                 }
             }
             Protocol::Http1 => {
-                let mut h1_obj = crate::inspect::http::H1InterceptObject::new(self.ctx);
+                let mut h1_obj = crate::inspect::http::H1InterceptObject::new(self.ctx, None);
                 h1_obj.set_io(
                     FlexBufReader::with_bytes(clt_r_buf, clt_r),
                     clt_w,
@@ -182,8 +182,11 @@ where
                 return Ok(StreamInspection::H1(h1_obj));
             }
             Protocol::Http2 => {
-                let mut h2_obj =
-                    crate::inspect::http::H2InterceptObject::new(self.ctx, self.upstream.clone());
+                let mut h2_obj = crate::inspect::http::H2InterceptObject::new(
+                    self.ctx,
+                    self.upstream.clone(),
+                    None,
+                );
                 h2_obj.set_io(OnceBufReader::new(clt_r, clt_r_buf), clt_w, ups_r, ups_w);
                 return Ok(StreamInspection::H2(h2_obj));
             }

@@ -239,6 +239,7 @@ impl FtpOverConnectBridge {
             ftp_command: "STOR".to_string(),
             ftp_path: "ftp-over-connect".to_string(),
             data_channel_tuple: None,  // Not available in native FTP proxy mode
+            keylog_buffer: None,
         });
 
         use std::time::Duration;

@@ -146,4 +146,14 @@ impl AuditHandle {
         let mut rng = rand::rng();
         self.auditor_config.task_audit_ratio.sample(&mut rng)
     }
+
+    #[inline]
+    pub(crate) fn tls_keylog(&self) -> bool {
+        self.auditor_config.tls_keylog.enable
+    }
+
+    #[inline]
+    pub(crate) fn tls_keylog_max_entries(&self) -> usize {
+        self.auditor_config.tls_keylog.max_entries
+    }
 }
