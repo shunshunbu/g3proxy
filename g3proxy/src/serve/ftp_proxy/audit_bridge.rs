@@ -50,14 +50,14 @@ pub(crate) struct FtpUploadAuditContext {
 ///   extra allocations, no overhead.
 pub(crate) async fn run_ftp_upload_audit_or_relay<CR, UW>(
     clt_r: &mut CR,
-    ups_w: &mut UW,
+    ups_w: UW,
     idle_wheel: &Arc<IdleWheel>,
     max_idle_count: usize,
     audit_ctx: Option<FtpUploadAuditContext>,
 ) -> Option<u64>
 where
     CR: AsyncRead + Send + Sync + Unpin,
-    UW: AsyncWrite + Send + Sync + Unpin,
+    UW: AsyncWrite + Send + Sync + Unpin + 'static,
 {
     match audit_ctx {
         Some(ac) => audit_and_forward(clt_r, ups_w, ac).await,
@@ -89,8 +89,7 @@ where
         });
 
         let mut clt_r = clt_r;
-        let mut ups_w = ups_w;
-        let result = audit_and_forward(&mut clt_r, &mut ups_w, ac).await;
+        let result = audit_and_forward(&mut clt_r, ups_w, ac).await;
 
         let _ = tokio::time::timeout(tokio::time::Duration::from_secs(10), upstream_to_client).await;
 
@@ -179,7 +178,7 @@ where
 
 async fn raw_forward_with_idle<CR, UW>(
     clt_r: &mut CR,
-    ups_w: &mut UW,
+    ups_w: UW,
     idle_wheel: &Arc<IdleWheel>,
     max_idle_count: usize,
 ) -> Option<u64>
@@ -191,6 +190,7 @@ where
     let mut idle_count = 0usize;
     let mut buf = vec![0u8; 32 * 1024];
     let mut total: u64 = 0;
+    let mut ups_w = ups_w;
     loop {
         tokio::select! {
             biased;
@@ -248,12 +248,12 @@ where
 
 async fn audit_and_forward<CR, UW>(
     clt_r: &mut CR,
-    ups_w: &mut UW,
+    mut ups_w: UW,
     audit_ctx: FtpUploadAuditContext,
 ) -> Option<u64>
 where
     CR: AsyncRead + Send + Sync + Unpin,
-    UW: AsyncWrite + Send + Sync + Unpin,
+    UW: AsyncWrite + Send + Sync + Unpin + 'static,
 {
     let idle_checker = IdleWheelChecker::new(audit_ctx.idle_wheel);
     let mut adapter = match audit_ctx
@@ -262,7 +262,7 @@ where
         .await
     {
         Ok(a) => a,
-        Err(_) => return raw_forward(clt_r, ups_w).await,
+        Err(_) => return raw_forward(clt_r, &mut ups_w).await,
     };
     if let Some(addr) = audit_ctx.client_addr {
         adapter.set_client_addr(addr);
@@ -281,20 +281,18 @@ where
         .audit_and_forward(
             &mut state,
             clt_r,
-            ups_w,
+            ups_w, // moved into the spawned audit writer task
             &audit_ctx.ftp_command,
             &audit_ctx.ftp_path,
         )
         .await;
 
+    // The audit writer task now owns `ups_w` and handles its flush +
+    // shutdown internally, so we just return the byte count.
     match end_state {
         g3_icap_client::reqmod::ftp::FtpAdaptationEndState::OriginalTransferred { bytes, .. }
         | g3_icap_client::reqmod::ftp::FtpAdaptationEndState::OriginalTransferredAfterFallback { bytes, .. }
-        | g3_icap_client::reqmod::ftp::FtpAdaptationEndState::AuditOnly { bytes, .. } => {
-            let _ = ups_w.flush().await;
-            let _ = ups_w.shutdown().await;
-            Some(bytes)
-        }
+        | g3_icap_client::reqmod::ftp::FtpAdaptationEndState::AuditOnly { bytes, .. } => Some(bytes),
     }
 }
 

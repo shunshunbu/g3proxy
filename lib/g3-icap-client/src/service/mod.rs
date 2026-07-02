@@ -7,7 +7,7 @@ mod config;
 pub use config::IcapServiceConfig;
 
 mod connection;
-pub(super) use connection::{IcapClientConnection, IcapClientReader, IcapClientWriter};
+pub(crate) use connection::{IcapClientConnection, IcapClientReader, IcapClientWriter};
 use connection::{IcapConnectionEofPoller, IcapConnectionPollRequest, IcapConnector};
 
 mod client;

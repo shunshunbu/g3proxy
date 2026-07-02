@@ -57,13 +57,21 @@ impl IcapClientConnection {
         self.writer_clean = true;
     }
 
-    pub(super) fn mark_io_inuse(&mut self) {
+    pub(crate) fn mark_io_inuse(&mut self) {
         self.reader_clean = false;
         self.writer_clean = false;
     }
 
     pub(super) fn reusable(&self) -> bool {
         self.reader_clean && self.writer_clean
+    }
+
+    /// Split the connection into reader and writer halves.
+    /// After splitting, the connection can no longer be saved to the pool
+    /// as a whole — both halves must be consumed independently.
+    pub fn split(mut self) -> (IcapClientReader, IcapClientWriter) {
+        self.mark_io_inuse();
+        (self.reader, self.writer)
     }
 }
 

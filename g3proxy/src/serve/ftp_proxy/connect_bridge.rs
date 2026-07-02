@@ -245,8 +245,7 @@ impl FtpOverConnectBridge {
         use std::time::Duration;
         let idle_wheel = IdleWheel::spawn(Duration::from_secs(1));
         let max_idle_count = 60;
-        let _ = run_ftp_upload_audit_or_relay(&mut clt_conn, &mut ups_conn, &idle_wheel, max_idle_count, audit_ctx).await;
-        let _ = ups_conn.shutdown().await;
+        let _ = run_ftp_upload_audit_or_relay(&mut clt_conn, ups_conn, &idle_wheel, max_idle_count, audit_ctx).await;
     }
 }
 

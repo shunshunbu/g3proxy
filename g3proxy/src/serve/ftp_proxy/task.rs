@@ -477,7 +477,7 @@ async fn handle_upload_data_channel<CW, UR>(
         Err(_) => return,
     };
 
-    let mut ups_conn = match tokio::net::TcpStream::connect(pdc.upstream_data_addr).await {
+    let ups_conn = match tokio::net::TcpStream::connect(pdc.upstream_data_addr).await {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -496,13 +496,12 @@ async fn handle_upload_data_channel<CW, UR>(
 
     let _ = run_ftp_upload_audit_or_relay(
         &mut clt_conn,
-        &mut ups_conn,
+        ups_conn,
         &ctx.idle_wheel,
         max_idle_count,
         audit_ctx,
     ).await;
 
-    let _ = ups_conn.shutdown().await;
     let _ = clt_conn.shutdown().await;
 
     if let Some(final_resp) = read_ftp_response(ups_r).await {
