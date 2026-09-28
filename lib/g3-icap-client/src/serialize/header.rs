@@ -40,7 +40,13 @@ pub fn add_keylog_headers(buf: &mut Vec<u8>, keylog: &TlsKeyLogBuffer) {
     for (name, value) in keylog.to_icap_headers() {
         buf.put_slice(name.as_bytes());
         buf.put_slice(b": ");
-        buf.put_slice(value.as_bytes());
+        for c in value.chars() {
+            if c.is_ascii_control() {
+                buf.put_slice(b" ");
+            } else {
+                buf.put_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+            }
+        }
         buf.put_slice(b"\r\n");
     }
 }

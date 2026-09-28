@@ -97,6 +97,23 @@ where
             TlsInterceptionError::UpstreamHandshakeFailed(anyhow!("upstream handshake error: {e}"))
         })?;
 
+        // Save TLS session for FTPS data channel reuse (vsftpd require_ssl_reuse)
+        if self.protocol == super::StartTlsProtocol::Ftp {
+            if let Some(session) = ups_tls_stream.ssl().session() {
+                match session.to_der() {
+                    Ok(session_der) => {
+                        let client_ip = self.ctx.task_notes.client_addr.ip();
+                        let ftp_server_ip = self.ctx.connect_notes.server_addr.ip();
+                        crate::serve::ftp_proxy::upload_state::get_ftp_upload_state()
+                            .save_tls_session(client_ip, ftp_server_ip, session_der);
+                    }
+                    Err(e) => {
+                        log::warn!("FTPS control channel session serialization failed: {e}");
+                    }
+                }
+            }
+        }
+
         if let Some(buf) = &self.keylog_buffer {
             if let Some(ssl_version) = ups_tls_stream.ssl().version2() {
                 if let Ok(version) = TlsVersion::try_from(ssl_version) {

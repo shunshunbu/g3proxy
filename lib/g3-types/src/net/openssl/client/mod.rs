@@ -116,6 +116,7 @@ pub struct OpensslClientConfigBuilder {
     #[cfg(any(awslc, boringssl))]
     permute_extensions: bool,
     insecure: bool,
+    security_level: Option<u32>,
 }
 
 impl Default for OpensslClientConfigBuilder {
@@ -141,6 +142,7 @@ impl Default for OpensslClientConfigBuilder {
             #[cfg(any(awslc, boringssl))]
             permute_extensions: false,
             insecure: false,
+            security_level: None,
         }
     }
 }
@@ -301,6 +303,10 @@ impl OpensslClientConfigBuilder {
 
     pub fn set_insecure(&mut self, enable: bool) {
         self.insecure = enable;
+    }
+
+    pub fn set_security_level(&mut self, level: u32) {
+        self.security_level = Some(level);
     }
 
     fn set_verify(&self, builder: &mut SslConnectorBuilder) {
@@ -555,6 +561,10 @@ impl OpensslClientConfigBuilder {
             ctx_builder
                 .set_alpn_protos(buf.as_slice())
                 .map_err(|e| anyhow!("failed to set alpn protocols: {e}"))?;
+        }
+
+        if let Some(level) = self.security_level {
+            ctx_builder.set_security_level(level);
         }
 
         Ok(OpensslClientConfig {

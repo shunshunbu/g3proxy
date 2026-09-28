@@ -46,7 +46,7 @@ macro_rules! intercept_log {
     };
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) enum StartTlsProtocol {
     Smtp,
     #[allow(unused)]

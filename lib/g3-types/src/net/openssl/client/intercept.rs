@@ -109,6 +109,7 @@ pub struct OpensslInterceptionClientConfigBuilder {
     #[cfg(any(awslc, boringssl))]
     permute_extensions: bool,
     insecure: bool,
+    security_level: Option<u32>,
 }
 
 impl Default for OpensslInterceptionClientConfigBuilder {
@@ -129,6 +130,7 @@ impl Default for OpensslInterceptionClientConfigBuilder {
             #[cfg(any(awslc, boringssl))]
             permute_extensions: false,
             insecure: false,
+            security_level: None,
         }
     }
 }
@@ -232,6 +234,10 @@ impl OpensslInterceptionClientConfigBuilder {
         self.insecure = enable;
     }
 
+    pub fn set_security_level(&mut self, level: u32) {
+        self.security_level = Some(level);
+    }
+
     fn set_verify(&self, builder: &mut SslContextBuilder) {
         if self.insecure {
             warn!(
@@ -255,6 +261,12 @@ impl OpensslInterceptionClientConfigBuilder {
                 .map_err(|e| anyhow!("failed to set max ssl version to {version}: {e}"))?;
         }
         Ok(())
+    }
+
+    fn build_set_security_level(&self, ctx_builder: &mut SslContextBuilder) {
+        if let Some(level) = self.security_level {
+            ctx_builder.set_security_level(level);
+        }
     }
 
     fn build_set_verify_cert_store(
@@ -315,6 +327,8 @@ impl OpensslInterceptionClientConfigBuilder {
 
         self.build_set_tls_version(&mut ctx_builder)?;
 
+        self.build_set_security_level(&mut ctx_builder);
+
         if !self.supported_groups.is_empty() {
             ctx_builder
                 .set_groups_list(&self.supported_groups)
@@ -367,6 +381,8 @@ impl OpensslInterceptionClientConfigBuilder {
 
         self.build_set_tls_version(&mut ctx_builder)?;
 
+        self.build_set_security_level(&mut ctx_builder);
+
         if !self.supported_groups.is_empty() {
             ctx_builder
                 .set_groups_list(&self.supported_groups)
@@ -406,6 +422,8 @@ impl OpensslInterceptionClientConfigBuilder {
         self.set_verify(&mut ctx_builder);
 
         self.build_set_tls_version(&mut ctx_builder)?;
+
+        self.build_set_security_level(&mut ctx_builder);
 
         if !self.supported_groups.is_empty() {
             ctx_builder
@@ -453,6 +471,8 @@ impl OpensslInterceptionClientConfigBuilder {
             .map_err(|e| anyhow!("failed to create tlcp context builder: {e}"))?;
 
         self.set_verify(&mut ctx_builder);
+
+        self.build_set_security_level(&mut ctx_builder);
 
         if !self.supported_groups.is_empty() {
             ctx_builder

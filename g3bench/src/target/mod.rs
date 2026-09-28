@@ -23,6 +23,7 @@ mod stats;
 pub mod dns;
 pub mod h1;
 pub mod h2;
+pub mod icap;
 pub mod keyless;
 pub mod openssl;
 pub mod rustls;

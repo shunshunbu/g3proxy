@@ -358,6 +358,15 @@ fn set_openssl_tls_client_config_builder(
                 builder.set_insecure(enable);
                 Ok(())
             }
+            "security_level" => {
+                let level = crate::value::as_u32(v)
+                    .context(format!("invalid u32 value for key {k}"))?;
+                if level > 5 {
+                    return Err(anyhow!("invalid security_level {level}, must be 0-5"));
+                }
+                builder.set_security_level(level);
+                Ok(())
+            }
             _ => Err(anyhow!("invalid key {k}")),
         })?;
 
@@ -480,6 +489,15 @@ pub fn as_tls_interception_client_config_builder(
             "insecure" => {
                 let enable = crate::value::as_bool(v)?;
                 builder.set_insecure(enable);
+                Ok(())
+            }
+            "security_level" => {
+                let level = crate::value::as_u32(v)
+                    .context(format!("invalid u32 value for key {k}"))?;
+                if level > 5 {
+                    return Err(anyhow!("invalid security_level {level}, must be 0-5"));
+                }
+                builder.set_security_level(level);
                 Ok(())
             }
             _ => Err(anyhow!("invalid key {k}")),

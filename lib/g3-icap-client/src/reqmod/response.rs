@@ -38,6 +38,12 @@ impl ReqmodResponse {
         std::mem::take(&mut self.shared_headers)
     }
 
+    /// Returns true if the ICAP response has a body that needs to be drained.
+    /// 204 No Content and other NoPayload responses have no body.
+    pub(crate) fn has_body(&self) -> bool {
+        !matches!(self.payload, IcapReqmodResponsePayload::NoPayload)
+    }
+
     pub(crate) async fn parse<R>(
         reader: &mut R,
         max_header_size: usize,

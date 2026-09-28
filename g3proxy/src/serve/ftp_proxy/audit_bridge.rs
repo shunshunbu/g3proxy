@@ -18,13 +18,33 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use log::warn;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::task::JoinHandle;
 
-use g3_io_ext::{IdleWheel, IdleWheelChecker, StreamCopyConfig};
+use g3_io_ext::{IdleCheck, IdleInterval, IdleWheel, StreamCopyConfig};
 use g3_types::net::TlsKeyLogBuffer;
 
 use crate::config::server::ServerConfig;
+
+struct CountingIdleChecker {
+    idle_wheel: Arc<IdleWheel>,
+    max_idle_count: usize,
+}
+
+impl IdleCheck for CountingIdleChecker {
+    fn interval_timer(&self) -> IdleInterval {
+        self.idle_wheel.register()
+    }
+
+    fn check_quit(&self, idle_count: usize) -> bool {
+        idle_count >= self.max_idle_count
+    }
+
+    fn check_force_quit(&self) -> Option<g3_io_ext::IdleForceQuitReason> {
+        None
+    }
+}
 
 /// Context needed to perform ICAP audit of a single FTP upload data
 /// channel. Built by `handle_upload_data_channel` in `task.rs` from
@@ -32,6 +52,7 @@ use crate::config::server::ServerConfig;
 pub(crate) struct FtpUploadAuditContext {
     pub(crate) icap_client: Arc<g3_icap_client::reqmod::IcapReqmodClient>,
     pub(crate) idle_wheel: Arc<g3_io_ext::IdleWheel>,
+    pub(crate) max_idle_count: usize,
     pub(crate) copy_config: StreamCopyConfig,
     pub(crate) client_addr: Option<SocketAddr>,
     pub(crate) ftp_command: String,
@@ -84,7 +105,7 @@ where
 {
     if let Some(ac) = audit_ctx {
         let idle_wheel_clone = idle_wheel.clone();
-        let upstream_to_client: JoinHandle<()> = tokio::spawn(async move {
+        let mut upstream_to_client: JoinHandle<()> = tokio::spawn(async move {
             bidi_half_relay_with_idle(ups_r, clt_w, idle_wheel_clone, max_idle_count).await;
         });
 
@@ -92,18 +113,31 @@ where
         let mut ups_w = ups_w;
         let result = audit_and_forward(&mut clt_r, &mut ups_w, ac).await;
 
-        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(10), upstream_to_client).await;
+        // Wait for the upstream-to-client relay to finish, with a timeout
+        // to avoid leaking the task if the upstream never sends EOF.
+        if tokio::time::timeout(tokio::time::Duration::from_secs(10), &mut upstream_to_client)
+            .await
+            .is_err()
+        {
+            upstream_to_client.abort();
+        }
 
         result
     } else {
         let idle_wheel_clone = idle_wheel.clone();
-        let client_to_up = tokio::spawn(async move {
+        let mut client_to_up = tokio::spawn(async move {
             bidi_half_relay_with_idle(clt_r, ups_w, idle_wheel_clone, max_idle_count).await;
         });
-        let up_to_client = tokio::spawn(async move {
+        let mut up_to_client = tokio::spawn(async move {
             bidi_half_relay_with_idle(ups_r, clt_w, idle_wheel, max_idle_count).await;
         });
-        let _ = tokio::join!(client_to_up, up_to_client);
+
+        // Wait for both directions, but abort the other if one finishes first
+        // to avoid leaking tasks that would block forever on a stalled peer.
+        tokio::select! {
+            _ = &mut client_to_up => { up_to_client.abort(); }
+            _ = &mut up_to_client => { client_to_up.abort(); }
+        }
         None
     }
 }
@@ -130,10 +164,15 @@ where
 
     let writer = tokio::spawn(async move {
         let mut w = w;
-        let mut rx = chunk_rx;
+        let rx = chunk_rx;
+        // Write timeout prevents the writer from hanging indefinitely
+        // if the upstream socket stalls (e.g. TCP half-close).
+        const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
         while let Ok(chunk) = rx.recv_async().await {
-            if w.write_all(&chunk).await.is_err() {
-                break;
+            let write_result = tokio::time::timeout(WRITE_TIMEOUT, w.write_all(&chunk)).await;
+            match write_result {
+                Ok(Ok(_)) => {}
+                _ => break,
             }
         }
         let _ = w.flush().await;
@@ -141,9 +180,35 @@ where
     });
 
     let mut r = r;
+    let mut buf = vec![0u8; 32 * 1024];
+
+    // Wait for the first data byte without idle timeout. In FTP passive
+    // mode the data channel may connect long before actual file transfer
+    // begins (STOR/150 response). Do not start idle checking until the
+    // first byte arrives.
+    let first_read = r.read(&mut buf).await;
+
+    match first_read {
+        Ok(0) | Err(_) => {
+            // EOF or error before any data: signal EOF to writer and exit.
+            drop(chunk_tx);
+            let _ = writer.await;
+            return;
+        }
+        Ok(n) => {
+            let chunk = bytes::Bytes::copy_from_slice(&buf[..n]);
+            if chunk_tx.send_async(chunk).await.is_err() {
+                drop(chunk_tx);
+                let _ = writer.await;
+                return;
+            }
+        }
+    }
+
+    // Now that data transfer has started, enable idle checking.
     let mut idle_interval = idle_wheel.register();
     let mut idle_count = 0usize;
-    let mut buf = vec![0u8; 32 * 1024];
+
     loop {
         tokio::select! {
             biased;
@@ -221,31 +286,6 @@ where
     Some(total)
 }
 
-async fn raw_forward<CR, UW>(clt_r: &mut CR, ups_w: &mut UW) -> Option<u64>
-where
-    CR: AsyncRead + Send + Sync + Unpin,
-    UW: AsyncWrite + Send + Sync + Unpin,
-{
-    use tokio::io::AsyncReadExt;
-
-    let mut buf = vec![0u8; 32 * 1024];
-    let mut total: u64 = 0;
-    loop {
-        match clt_r.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => {
-                if ups_w.write_all(&buf[..n]).await.is_err() {
-                    return Some(total);
-                }
-                total += n as u64;
-            }
-            Err(_) => return Some(total),
-        }
-    }
-    let _ = ups_w.flush().await;
-    Some(total)
-}
-
 async fn audit_and_forward<CR, UW>(
     clt_r: &mut CR,
     ups_w: &mut UW,
@@ -255,14 +295,29 @@ where
     CR: AsyncRead + Send + Sync + Unpin,
     UW: AsyncWrite + Send + Sync + Unpin,
 {
-    let idle_checker = IdleWheelChecker::new(audit_ctx.idle_wheel);
+    let idle_checker = CountingIdleChecker {
+        idle_wheel: audit_ctx.idle_wheel.clone(),
+        max_idle_count: audit_ctx.max_idle_count,
+    };
     let mut adapter = match audit_ctx
         .icap_client
         .ftp_upload_audit_adapter(audit_ctx.copy_config, idle_checker)
         .await
     {
         Ok(a) => a,
-        Err(_) => return raw_forward(clt_r, ups_w).await,
+        Err(e) => {
+            warn!(
+                "FTP ICAP adapter creation failed, fallback to forward-only: {}",
+                e
+            );
+            return raw_forward_with_idle(
+                clt_r,
+                ups_w,
+                &audit_ctx.idle_wheel,
+                audit_ctx.max_idle_count,
+            )
+            .await;
+        }
     };
     if let Some(addr) = audit_ctx.client_addr {
         adapter.set_client_addr(addr);
@@ -290,6 +345,7 @@ where
     match end_state {
         g3_icap_client::reqmod::ftp::FtpAdaptationEndState::OriginalTransferred { bytes, .. }
         | g3_icap_client::reqmod::ftp::FtpAdaptationEndState::OriginalTransferredAfterFallback { bytes, .. }
+        | g3_icap_client::reqmod::ftp::FtpAdaptationEndState::OriginalTransferredInBackground { bytes }
         | g3_icap_client::reqmod::ftp::FtpAdaptationEndState::AuditOnly { bytes, .. } => {
             let _ = ups_w.flush().await;
             let _ = ups_w.shutdown().await;
@@ -302,6 +358,7 @@ where
 /// shared `CommonTaskContext` if an ICAP client is configured.
 pub(crate) fn build_audit_context(
     ctx: &super::task::CommonTaskContext,
+    max_idle_count: usize,
     ftp_command: &str,
     ftp_path: &str,
     data_channel_tuple: Option<g3_icap_client::reqmod::ConnectionTuple>,
@@ -312,6 +369,7 @@ pub(crate) fn build_audit_context(
     Some(FtpUploadAuditContext {
         icap_client,
         idle_wheel: ctx.idle_wheel.clone(),
+        max_idle_count,
         copy_config: ctx.server_config.limited_copy_config(),
         client_addr: Some(ctx.cc_info.client_addr()),
         ftp_command: ftp_command.to_string(),

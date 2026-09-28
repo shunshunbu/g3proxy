@@ -546,34 +546,71 @@ where
                 StreamInspection::Ftp(ftp_obj)
             }
             Protocol::Unknown => {
-                if let Some(upload_info) = crate::inspect::ftp::check_ftp_upload_data(
-                    self.ctx.task_notes.client_addr,
-                    self.ctx.connect_notes.server_addr,
-                ) {
-                    let data_channel_tuple = Some(ConnectionTuple {
-                        server_addr: self.ctx.connect_notes.client_addr,
-                        remote_addr: self.ctx.connect_notes.server_addr,
-                        protocol: ConnectionProtocol::Tcp,
-                    });
-
+                // FTP control ports (21, 990) running over FTPS are still
+                // control channels: route them to FtpInterceptObject so the
+                // STOR/APPE command can be parsed.
+                let port = self.upstream.port();
+                if port == 21 || port == 990 {
                     let ctx = self.prepare_ctx(protocol);
-                    let mut ftp_upload_obj =
-                        crate::inspect::ftp::FtpUploadDataInterceptObject::new(
-                            ctx,
-                            upload_info,
-                            data_channel_tuple,
-                            self.keylog_buffer.clone(),
-                        );
-                    ftp_upload_obj.set_io(
+                    let mut ftp_obj =
+                        crate::inspect::ftp::FtpInterceptObject::new(ctx, self.upstream.clone());
+                    ftp_obj.set_io(
                         Box::new(clt_r),
                         Box::new(clt_w),
-                        Box::new(ups_r),
+                        OnceBufReader::with_no_buf(Box::new(ups_r)),
                         Box::new(ups_w),
                     );
-                    return StreamInspection::FtpUploadData(ftp_upload_obj);
+                    return StreamInspection::Ftp(ftp_obj);
                 }
 
-                self.build_stream_inspect(protocol, has_alpn, clt_r, clt_w, ups_r, ups_w)
+                // For FTPS data channels: try the pending upload mark. In
+                // passive mode the data channel connects (and completes TLS)
+                // *before* STOR is sent on the control channel, so the mark
+                // may not exist yet. If the server IP is known FTPS, fall
+                // back to deferred checking inside intercept_pending.
+                let upload_info = crate::inspect::ftp::check_ftp_upload_data(
+                    self.ctx.task_notes.client_addr,
+                    self.ctx.connect_notes.server_addr,
+                );
+                let upload_info = match upload_info {
+                    Some(info) => Some(info),
+                    None => {
+                        if crate::inspect::ftp::get_ftps_domain(
+                            self.ctx.task_notes.client_addr,
+                            self.ctx.connect_notes.server_addr,
+                        )
+                        .is_some()
+                        {
+                            None
+                        } else {
+                            return self.build_stream_inspect(
+                                protocol, has_alpn, clt_r, clt_w, ups_r, ups_w,
+                            );
+                        }
+                    }
+                };
+
+                let data_channel_tuple = Some(ConnectionTuple {
+                    server_addr: self.ctx.connect_notes.client_addr,
+                    remote_addr: self.ctx.connect_notes.server_addr,
+                    protocol: ConnectionProtocol::Tcp,
+                });
+
+                let ctx = self.prepare_ctx(protocol);
+                let mut ftp_upload_obj =
+                    crate::inspect::ftp::FtpUploadDataInterceptObject::new(
+                        ctx,
+                        upload_info,
+                        data_channel_tuple,
+                        self.keylog_buffer.clone(),
+                    );
+                ftp_upload_obj.set_io(
+                    Box::new(clt_r),
+                    Box::new(clt_w),
+                    Box::new(ups_r),
+                    Box::new(ups_w),
+                );
+                StreamInspection::FtpUploadData(ftp_upload_obj)
             }
             _ => self.build_stream_inspect(protocol, has_alpn, clt_r, clt_w, ups_r, ups_w),
         }

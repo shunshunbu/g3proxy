@@ -126,3 +126,14 @@ g3bench dns "1.1.1.1" -e doh www.example.com,A --dump-result
 g3bench dns "94.140.14.140" -e doq www.example.com,A --dump-result
 g3bench dns "2a10:50c0::1:ff" -e doq --tls-name unfiltered.adguard-dns.com www.example.com,A --dump-result
 ```
+
+
+## Test ICAP
+g3bench icap -n 100 -c 10 -f 1M -s ex206 127.0.0.1:1344
+-s, --service	ICAP 服务名	echo
+-m, --method	ICAP 方法 (REQMOD/RESPMOD)	REQMOD
+-f, --file-size	每次请求上传文件大小	1M
+--chunk-size	chunk 大小	64K
+--timeout	请求超时	30s
+--connect-timeout	连接超时	10s
+--drain-response	读取响应体（echo 服务需要）	默认开启

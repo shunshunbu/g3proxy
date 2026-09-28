@@ -230,23 +230,21 @@ impl FtpOverConnectBridge {
             Err(_) => return,
         };
 
-        // Build audit context: use ICAP if available, else raw forward.
         let audit_ctx = self.icap_client.as_ref().map(|client| FtpUploadAuditContext {
             icap_client: client.clone(),
             idle_wheel: self.idle_wheel.clone(),
+            max_idle_count: 60, // 60 ticks × 1s interval = 60s idle timeout
             copy_config: self.server_config.limited_copy_config(),
             client_addr: Some(self.cc_info.client_addr()),
             ftp_command: "STOR".to_string(),
             ftp_path: "ftp-over-connect".to_string(),
-            data_channel_tuple: None,  // Not available in native FTP proxy mode
+            data_channel_tuple: None,
             keylog_buffer: None,
         });
 
-        use std::time::Duration;
-        let idle_wheel = IdleWheel::spawn(Duration::from_secs(1));
-        let max_idle_count = 60;
-        let _ = run_ftp_upload_audit_or_relay(&mut clt_conn, &mut ups_conn, &idle_wheel, max_idle_count, audit_ctx).await;
+        let _ = run_ftp_upload_audit_or_relay(&mut clt_conn, &mut ups_conn, &self.idle_wheel, 60, audit_ctx).await;
         let _ = ups_conn.shutdown().await;
+        let _ = clt_conn.shutdown().await;
     }
 }
 

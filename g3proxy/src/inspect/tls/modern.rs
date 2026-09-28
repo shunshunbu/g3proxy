@@ -69,7 +69,7 @@ where
         } else {
             None
         };
-        let ups_ssl = match self.ctx.user_site_tls_client() {
+        let mut ups_ssl = match self.ctx.user_site_tls_client() {
             Some(c) => c
                 .build_mimic_ssl(sni_hostname, &self.upstream, alpn_ext.as_ref())
                 .map_err(|e| {
@@ -89,12 +89,38 @@ where
         };
         self.keylog_buffer = keylog_buffer;
 
-        // fetch fake server cert early in the background
-        // Use FTPS domain if available, otherwise use SNI or upstream hostname
-        let cert_domain = if let Some(domain) = crate::inspect::ftp::get_ftps_domain(
+        // Check if this is an FTPS data channel (vsftpd require_ssl_reuse)
+        let ftps_domain = crate::inspect::ftp::get_ftps_domain(
             self.ctx.task_notes.client_addr,
             self.ctx.connect_notes.server_addr,
-        ) {
+        );
+
+        // Reuse FTPS control channel TLS session for data channel (vsftpd require_ssl_reuse)
+        if ftps_domain.is_some() {
+            if let Some(session_der) = crate::serve::ftp_proxy::upload_state::get_ftp_upload_state()
+                .get_tls_session(
+                    self.ctx.task_notes.client_addr.ip(),
+                    self.ctx.connect_notes.server_addr.ip(),
+                )
+            {
+                match openssl::ssl::SslSession::from_der(&session_der) {
+                    Ok(session) => {
+                        unsafe {
+                            if let Err(e) = ups_ssl.set_session(&session) {
+                                log::warn!("FTPS data channel set_session failed: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("FTPS data channel session deserialization failed: {e}");
+                    }
+                }
+            }
+        }
+
+        // fetch fake server cert early in the background
+        // Use FTPS domain if available, otherwise use SNI or upstream hostname
+        let cert_domain = if let Some(domain) = ftps_domain {
             domain
         } else {
             sni_hostname

@@ -65,6 +65,20 @@ impl IcapClientConnection {
     pub(super) fn reusable(&self) -> bool {
         self.reader_clean && self.writer_clean
     }
+
+    /// Create a placeholder connection with no-op reader/writer.
+    /// Used when the real connection halves have been moved into a
+    /// background task and we need a temporary container to put them back.
+    pub fn placeholder() -> Self {
+        use tokio::io::{empty, sink};
+        IcapClientConnection {
+            reader: BufReader::new(Box::new(empty())),
+            writer: Box::new(sink()),
+            reader_clean: true,
+            writer_clean: true,
+            reused_connection: false,
+        }
+    }
 }
 
 pub(super) struct IcapConnector {

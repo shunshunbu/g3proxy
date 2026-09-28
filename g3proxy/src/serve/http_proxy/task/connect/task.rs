@@ -437,6 +437,20 @@ impl HttpProxyConnectTask {
         self.task_notes.stage = ServerTaskStage::Replying;
         self.reply_ok(&mut clt_w).await?;
 
+        // For FTPS control channel (port 990), mark the domain early
+        // This ensures data channels can find the domain when they connect
+        let upstream_port = self.upstream.port();
+        if upstream_port == 990 {
+            let client_ip = self.task_notes.client_addr().ip();
+            if let Some(server_ip) = self.tcp_notes.next.map(|addr| addr.ip()) {
+                let domain = match self.upstream.host() {
+                    g3_types::net::Host::Domain(d) => d.to_string(),
+                    g3_types::net::Host::Ip(ip) => ip.to_string(),
+                };
+                get_ftp_upload_state().mark_ftps_domain(client_ip, server_ip, &domain);
+            }
+        }
+
         self.task_notes.mark_relaying();
         if let Some(user_ctx) = self.task_notes.user_ctx() {
             user_ctx.foreach_req_stats(|s| {
@@ -522,6 +536,7 @@ impl HttpProxyConnectTask {
                         let audit_ctx = FtpUploadAuditContext {
                             icap_client: Arc::new(icap_client),
                             idle_wheel: self.ctx.idle_wheel.clone(),
+                            max_idle_count: self.ctx.server_config.task_max_idle_count(),
                             copy_config: self.ctx.server_config.limited_copy_config(),
                             client_addr: Some(self.task_notes.client_addr()),
                             ftp_command: upload_info.ftp_command,

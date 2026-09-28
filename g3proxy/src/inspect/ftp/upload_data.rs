@@ -23,7 +23,7 @@ use crate::serve::ftp_proxy::audit_bridge::{
     FtpUploadAuditContext, run_ftp_upload_audit_or_relay_bidi,
 };
 use crate::serve::ftp_proxy::upload_state::{get_ftp_upload_state, PendingUploadInfo};
-use crate::serve::{ServerTaskError, ServerTaskResult};
+use crate::serve::ServerTaskResult;
 
 struct FtpUploadDataIo {
     clt_r: BoxAsyncRead,
@@ -43,14 +43,14 @@ pub(crate) struct FtpUploadDataInterceptObject<SC: ServerConfig> {
 impl<SC: ServerConfig> FtpUploadDataInterceptObject<SC> {
     pub(crate) fn new(
         ctx: StreamInspectContext<SC>,
-        upload_info: PendingUploadInfo,
+        upload_info: Option<PendingUploadInfo>,
         data_channel_tuple: Option<ConnectionTuple>,
         keylog_buffer: Option<Arc<TlsKeyLogBuffer>>,
     ) -> Self {
         FtpUploadDataInterceptObject {
             io: None,
             ctx,
-            upload_info: Some(upload_info),
+            upload_info,
             data_channel_tuple,
             keylog_buffer,
         }
@@ -104,6 +104,7 @@ where
         let audit_ctx = FtpUploadAuditContext {
             icap_client,
             idle_wheel: self.ctx.idle_wheel.clone(),
+            max_idle_count: self.ctx.max_idle_count,
             copy_config: self.ctx.server_config.limited_copy_config(),
             client_addr: Some(self.ctx.task_notes.client_addr),
             ftp_command: upload_info.ftp_command,
@@ -145,10 +146,10 @@ where
         let mut clt_buf = vec![0u8; 4096];
         let mut ups_buf = vec![0u8; 4096];
 
-        let mut idle_interval = ctx.idle_wheel.register();
-        let mut idle_count = 0usize;
-        let max_idle_count = ctx.max_idle_count;
-
+        // Wait for the first data byte without idle timeout. In FTP passive
+        // mode the data channel connects and completes TLS *before* the
+        // control channel sends STOR, so this wait can be arbitrarily long.
+        // Only start idle checking once actual file data transfer begins.
         loop {
             tokio::select! {
                 biased;
@@ -167,11 +168,6 @@ where
                         Ok(n) => {
                             // Prepend the chunk we just read so the spawned
                             // relay task sees a continuous stream from byte 0.
-                            // Previously we wrote this chunk to ups_w
-                            // synchronously here; that would block the whole
-                            // intercept_pending if upstream backpressured us,
-                            // which is what caused large-file (>1 GiB) uploads
-                            // to hang and trigger TCP retransmits.
                             let clt_r = io::Cursor::new(clt_buf[..n].to_vec()).chain(clt_r);
 
                             if let Some(upload_info) = check_ftp_upload_data(
@@ -200,6 +196,7 @@ where
                                 let audit_ctx = FtpUploadAuditContext {
                                     icap_client,
                                     idle_wheel: ctx.idle_wheel.clone(),
+                                    max_idle_count: ctx.max_idle_count,
                                     copy_config: ctx.server_config.limited_copy_config(),
                                     client_addr: Some(ctx.task_notes.client_addr),
                                     ftp_command: upload_info.ftp_command,
@@ -264,22 +261,6 @@ where
                             let _ = ups_w.shutdown().await;
                             break;
                         }
-                    }
-                }
-
-                _ = idle_interval.tick() => {
-                    idle_count += 1;
-
-                    if idle_count >= max_idle_count {
-                        let _ = clt_w.shutdown().await;
-                        let _ = ups_w.shutdown().await;
-                        return Err(ServerTaskError::Idle(idle_interval.period(), idle_count));
-                    }
-
-                    if ctx.server_quit_policy.force_quit() {
-                        let _ = clt_w.shutdown().await;
-                        let _ = ups_w.shutdown().await;
-                        return Err(ServerTaskError::CanceledAsServerQuit);
                     }
                 }
             }

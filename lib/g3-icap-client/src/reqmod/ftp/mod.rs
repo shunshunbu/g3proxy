@@ -8,14 +8,17 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::BufMut;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use flume;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, sink, empty};
 use tokio::time::Instant;
 
-use g3_io_ext::{IdleCheck, LimitedWriteExt, StreamCopyConfig};
+use g3_io_ext::{IdleCheck, LimitedWriteExt, OnceBufReader, StreamCopyConfig};
+
+use log::{warn, debug};
 
 use super::{ConnectionTuple, IcapReqmodClient, TlsKeyLogBuffer};
 use crate::reqmod::mail::ReqmodAdaptationRunState;
-use crate::service::IcapClientConnection;
+use crate::service::{IcapClientConnection, IcapClientReader, IcapClientWriter};
 use crate::{IcapServiceClient, IcapServiceOptions};
 
 mod error;
@@ -67,6 +70,12 @@ pub enum FtpAdaptationEndState {
     OriginalTransferredAfterFallback {
         bytes: u64,
         icap_error: String,
+    },
+    /// ICAP audit is being processed in the background.  The upload
+    /// data has already been forwarded to the upstream FTP server.
+    /// The audit verdict will be available asynchronously.
+    OriginalTransferredInBackground {
+        bytes: u64,
     },
 }
 
@@ -139,14 +148,12 @@ impl<I: IdleCheck> FtpUploadAdapter<I> {
 
     fn build_http_header(&self, ftp_cmd: &str, ftp_path: &str) -> Vec<u8> {
         let mut header = Vec::with_capacity(256);
-        // Use PUT <path> with synthetic FTP/1.0 pseudo-version, which
-        // keeps ICAP parsers happy while carrying the original path.
         let _ = write!(
             header,
-            "PUT {} FTP/1.0\r\n\
+            "PUT {} HTTP/1.1\r\n\
+             Host: localhost\r\n\
              Content-Type: application/octet-stream\r\n\
              X-FTP-Command: {}\r\n\
-             Transfer-Encoding: chunked\r\n\
              \r\n",
             ftp_path, ftp_cmd
         );
@@ -154,6 +161,7 @@ impl<I: IdleCheck> FtpUploadAdapter<I> {
     }
 
     fn push_extended_headers(&self, data: &mut Vec<u8>) {
+        data.put_slice(b"Allow: 204\r\n");
         data.put_slice(b"X-Transformed-From: FTP\r\n");
         if let Some(addr) = self.client_addr {
             crate::serialize::add_client_addr(data, addr);
@@ -188,9 +196,152 @@ impl<I: IdleCheck> FtpUploadAdapter<I> {
         CR: AsyncRead + Send + Sync + Unpin,
         UW: AsyncWrite + Send + Sync + Unpin,
     {
-        // 1) Build and send ICAP REQMOD header + encapsulated HTTP
-        //    header.  This is the only place we touch the ICAP writer
-        //    with a vectorized write; the remainder is chunked body.
+        if let Err(e) = self.send_icap_header(ftp_cmd, ftp_path).await {
+            warn!("FTP ICAP header send failed, fallback to forward-only: {}", e);
+            return self.fallback_forward_only(clt_r, ups_w, state, e).await;
+        }
+
+        let (total_bytes, icap_ok, icap_handle) = match self.run_relay_loop(clt_r, ups_w).await {
+            Ok((bytes, ok, handle)) => (bytes, ok, handle),
+            Err(bytes) => {
+                return FtpAdaptationEndState::OriginalTransferredAfterFallback {
+                    bytes,
+                    icap_error: "upstream write failed".to_string(),
+                };
+            }
+        };
+
+        state.clt_read_finished = true;
+
+        let _ = ups_w.flush().await;
+        let _ = ups_w.shutdown().await;
+
+        if !icap_ok {
+            let _ = icap_handle.await;
+            return FtpAdaptationEndState::OriginalTransferredAfterFallback {
+                bytes: total_bytes,
+                icap_error: "icap aborted due to slow write".to_string(),
+            };
+        }
+
+        let icap_client = self.icap_client.clone();
+
+        tokio::spawn(async move {
+            // Overall timeout for the background ICAP response processing.
+            // Prevents resource leaks if the ICAP server hangs.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                async {
+                    let (icap_result, icap_writer, icap_reader, rsp_header_buf) = match icap_handle.await {
+                        Ok((result, writer, reader, header_buf)) => (result, writer, reader, header_buf),
+                        Err(_) => {
+                            warn!("FTP ICAP background task panicked");
+                            return;
+                        }
+                    };
+
+                    if let Err(e) = icap_result {
+                        warn!("FTP ICAP write failed ({}), audit incomplete", e);
+                        return;
+                    }
+
+                    let mut icap_connection = IcapClientConnection::placeholder();
+                    icap_connection.writer = icap_writer;
+                    icap_connection.reader = if rsp_header_buf.is_empty() {
+                        icap_reader
+                    } else {
+                        // Prepend the response header captured during drain
+                        // so that ReqmodResponse::parse can read the status
+                        // line and headers that were otherwise consumed and
+                        // discarded by the anti-deadlock drain loop.
+                        let prefixed = OnceBufReader::with_bytes(
+                            icap_reader.into_inner(),
+                            bytes::Bytes::from(rsp_header_buf),
+                        );
+                        BufReader::new(Box::new(prefixed))
+                    };
+                    icap_connection.mark_writer_finished();
+
+                    let icap_max_header_size = icap_client.config.icap_max_header_size;
+                    let respond_shared_names = icap_client.config.respond_shared_names.clone();
+
+                    // Parse the ICAP response first. The response headers
+                    // are available once the write side is done (the server
+                    // sends them after receiving the complete request).
+                    let parse_result = crate::reqmod::response::ReqmodResponse::parse(
+                        &mut icap_connection.reader,
+                        icap_max_header_size,
+                        &respond_shared_names,
+                    ).await;
+
+                    let rsp = match parse_result {
+                        Ok(rsp) => rsp,
+                        Err(e) => {
+                            warn!("FTP ICAP response parse failed: {}", e);
+                            // Do not save a connection with partial/unparsed response
+                            return;
+                        }
+                    };
+
+                    debug!(
+                        "FTP ICAP response: code={}, reason={}, keep_alive={}",
+                        rsp.code, rsp.reason, rsp.keep_alive
+                    );
+
+                    // Drain any remaining response body data (e.g. from echo
+                    // services that echo back the request body).
+                    // Skip draining for responses with no body (e.g. 204 No Content).
+                    let drain_clean = if !rsp.has_body() {
+                        true
+                    } else {
+                        let mut drain_buf = [0u8; 65536];
+                        let mut clean = false;
+                        loop {
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                icap_connection.reader.read(&mut drain_buf),
+                            )
+                            .await
+                            {
+                                Ok(Ok(0)) => {
+                                    clean = true;
+                                    break;
+                                }
+                                Ok(Ok(_)) => continue,
+                                Ok(Err(_)) | Err(_) => break,
+                            }
+                        }
+                        clean
+                    };
+
+                    icap_connection.mark_reader_finished();
+
+                    // Only save the connection for reuse if the response indicates
+                    // success, keep-alive is enabled, and the body was cleanly
+                    // drained (no leftover data or read errors).
+                    if drain_clean && rsp.keep_alive && rsp.code >= 200 && rsp.code < 300 {
+                        let _ = icap_client.save_connection(icap_connection);
+                    } else {
+                        warn!(
+                            "FTP ICAP connection discarded (code={}, keep_alive={}, drain_clean={})",
+                            rsp.code, rsp.keep_alive, drain_clean
+                        );
+                    }
+                },
+            )
+            .await;
+        });
+
+        FtpAdaptationEndState::OriginalTransferredInBackground {
+            bytes: total_bytes,
+        }
+    }
+
+    async fn send_icap_header(
+        &mut self,
+        ftp_cmd: &str,
+        ftp_path: &str,
+    ) -> io::Result<()> {
         let http_header = self.build_http_header(ftp_cmd, ftp_path);
         let mut icap_header = Vec::with_capacity(self.icap_client.partial_request_header.len() + 64);
         icap_header.extend_from_slice(&self.icap_client.partial_request_header);
@@ -201,132 +352,222 @@ impl<I: IdleCheck> FtpUploadAdapter<I> {
             http_header.len()
         );
 
-        let header_sent = self
-            .icap_connection
+        debug!(
+            "FTP ICAP request header ({} bytes, http_header {} bytes):\n{}",
+            icap_header.len(),
+            http_header.len(),
+            String::from_utf8_lossy(&icap_header)
+        );
+
+        self.icap_connection
             .writer
             .write_all_vectored([io::IoSlice::new(&icap_header), io::IoSlice::new(&http_header)])
-            .await;
+            .await?;
+        self.icap_connection.writer.flush().await
+    }
 
-        if let Err(e) = header_sent {
-            return self.fallback_forward_only(clt_r, ups_w, state, e).await;
-        }
-
-        // 2) Streaming loop: read -> chunked-write to ICAP, raw-write
-        //    to upstream.  We intentionally do NOT flush on every
-        //    iteration; ICAP writer flushing happens once after body
-        //    terminator.  If ICAP writes fail partway through we switch
-        //    to "forward-only" mode so the upload is not lost.
-        let buf_size = self.copy_config.buffer_size().max(16 * 1024);
+    async fn run_relay_loop<CR, UW>(
+        &mut self,
+        clt_r: &mut CR,
+        ups_w: &mut UW,
+    ) -> Result<(u64, bool, tokio::task::JoinHandle<(Result<u64, &'static str>, IcapClientWriter, IcapClientReader, Vec<u8>)>), u64>
+    where
+        CR: AsyncRead + Send + Sync + Unpin,
+        UW: AsyncWrite + Send + Sync + Unpin,
+    {
+        // Use a 256 KiB buffer to cut the number of syscalls for large
+        // files (1 GiB would otherwise need 65536 x 16 KiB copies).
+        let buf_size = self.copy_config.buffer_size().max(256 * 1024);
         let mut buf = vec![0u8; buf_size];
         let mut total_bytes: u64 = 0;
-        let mut icap_alive = true;
-        let mut last_icap_err: Option<io::Error> = None;
+
         let mut idle_interval = self.idle_checker.interval_timer();
+        let mut idle_count = 0usize;
+
+        // ICAP buffering: channel with backpressure
+        // When ICAP is slower than the upstream, send_async blocks
+        // and naturally throttles the client read rate.
+        const CHANNEL_CAPACITY: usize = 64;
+        let (chunk_tx, chunk_rx) = flume::bounded::<bytes::Bytes>(CHANNEL_CAPACITY);
+
+        // Take both the ICAP writer and reader. The writer is used to
+        // send chunked body data; the reader is concurrently drained to
+        // prevent deadlock with echo-style ICAP services that start
+        // sending back the response while we are still uploading.
+        let icap_writer = std::mem::replace(&mut self.icap_connection.writer, Box::new(sink()));
+        let icap_reader = std::mem::replace(
+            &mut self.icap_connection.reader,
+            BufReader::new(Box::new(empty())),
+        );
+        let max_header_size = self.icap_client.config.icap_max_header_size;
+
+        let icap_handle = tokio::spawn(async move {
+            let mut write_buf = bytes::BytesMut::with_capacity(4 * 1024 * 1024);
+            let mut icap_writer = icap_writer;
+            let mut icap_reader = icap_reader;
+            let mut total_written: u64 = 0;
+            let mut pending_chunks: usize = 0;
+            let mut drain_buf = [0u8; 65536];
+            let mut reader_closed = false;
+            // Capture the ICAP response header during drain so it can be
+            // replayed for parsing.  Echo-style ICAP servers send the full
+            // response (header + body) while the upload is still in
+            // progress; without this capture the header is consumed and
+            // discarded by the drain, causing parse to fail.
+            let mut rsp_header_buf: Vec<u8> = Vec::new();
+            let mut rsp_header_done = false;
+
+            // Combined write + drain loop.
+            // "biased" ensures we prioritise writing chunks over draining
+            // so that the request body is delivered as fast as possible.
+            loop {
+                if reader_closed {
+                    // Reader is closed; only process remaining chunks.
+                    match chunk_rx.recv_async().await {
+                        Ok(chunk) => {
+                            total_written += chunk.len() as u64;
+                            append_chunk_header(&mut write_buf, chunk.len());
+                            write_buf.extend_from_slice(&chunk);
+                            write_buf.extend_from_slice(b"\r\n");
+                            pending_chunks += 1;
+
+                            if pending_chunks >= 16 || write_buf.len() >= 4 * 1024 * 1024 {
+                                if icap_writer.write_all(&write_buf).await.is_err() {
+                                    return (Err("icap write failed"), icap_writer, icap_reader, Vec::new());
+                                }
+                                if icap_writer.flush().await.is_err() {
+                                    return (Err("icap flush failed"), icap_writer, icap_reader, Vec::new());
+                                }
+                                write_buf.clear();
+                                pending_chunks = 0;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                    continue;
+                }
+
+                tokio::select! {
+                    biased;
+                    chunk = chunk_rx.recv_async() => {
+                        match chunk {
+                            Ok(chunk) => {
+                                total_written += chunk.len() as u64;
+                                // Write hex length + CRLF + data + CRLF
+                                // into write_buf in one pass to avoid
+                                // per-chunk String allocation.
+                                append_chunk_header(&mut write_buf, chunk.len());
+                                write_buf.extend_from_slice(&chunk);
+                                write_buf.extend_from_slice(b"\r\n");
+                                pending_chunks += 1;
+
+                                if pending_chunks >= 16 || write_buf.len() >= 4 * 1024 * 1024 {
+                                    if icap_writer.write_all(&write_buf).await.is_err() {
+                                        return (Err("icap write failed"), icap_writer, icap_reader, Vec::new());
+                                    }
+                                    if icap_writer.flush().await.is_err() {
+                                        return (Err("icap flush failed"), icap_writer, icap_reader, Vec::new());
+                                    }
+                                    write_buf.clear();
+                                    pending_chunks = 0;
+                                }
+                            }
+                            Err(_) => {
+                                // Channel closed — all request data has been sent.
+                                break;
+                            }
+                        }
+                    }
+                    // Drain the ICAP reader concurrently.  This is critical
+                    // for echo services that start streaming the response
+                    // body back before the request body is complete.  Without
+                    // this drain, the TCP receive buffer fills up, the ICAP
+                    // server blocks on writing, then stops reading our data,
+                    // and the whole pipeline deadlocks.
+                    n = icap_reader.read(&mut drain_buf) => {
+                        match n {
+                            Ok(0) | Err(_) => {
+                                // Connection closed / error — stop draining
+                                // to avoid busy-looping on a closed reader.
+                                reader_closed = true;
+                            }
+                            Ok(read_len) => {
+                                // Capture the ICAP response header so it
+                                // can be replayed for parsing after the
+                                // upload finishes.  Echo-style ICAP servers
+                                // send the full response while we are still
+                                // uploading; without this capture the header
+                                // is lost and parsing fails with
+                                // "not long enough".
+                                if !rsp_header_done {
+                                    rsp_header_buf.extend_from_slice(&drain_buf[..read_len]);
+                                    if let Some(pos) = find_icap_header_end(&rsp_header_buf) {
+                                        rsp_header_buf.truncate(pos + 4);
+                                        rsp_header_done = true;
+                                    } else if rsp_header_buf.len() >= max_header_size {
+                                        rsp_header_done = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Flush remaining write buffer
+            if !write_buf.is_empty() {
+                let _ = icap_writer.write_all(&write_buf).await;
+                let _ = icap_writer.flush().await;
+            }
+
+            let _ = icap_writer.write_all(b"0\r\n\r\n").await;
+            let _ = icap_writer.flush().await;
+
+            (Ok(total_written), icap_writer, icap_reader, rsp_header_buf)
+        });
+
+        let mut icap_alive = true;
 
         loop {
             tokio::select! {
                 biased;
-
-                n = clt_r.read(&mut buf) => {
-                    match n {
+                res = clt_r.read(&mut buf) => {
+                    match res {
                         Ok(0) => break,
                         Ok(n) => {
+                            idle_count = 0;
                             total_bytes += n as u64;
 
-                            // Always forward to upstream first.
                             if ups_w.write_all(&buf[..n]).await.is_err() {
-                                // Upstream gone: nothing we can do.  Treat as
-                                // end-of-stream; ICAP termination follows.
-                                break;
+                                drop(chunk_tx);
+                                return Err(total_bytes);
                             }
 
                             if icap_alive {
-                                if write_icap_chunk(&mut self.icap_connection.writer, &buf[..n])
-                                    .await
-                                    .is_err()
-                                {
-                                    icap_alive = false;
-                                    last_icap_err = Some(io::Error::new(
-                                        io::ErrorKind::BrokenPipe,
-                                        "icap body write failed",
-                                    ));
+                                let chunk = bytes::Bytes::copy_from_slice(&buf[..n]);
+                                match chunk_tx.send_async(chunk).await {
+                                    Ok(_) => {}
+                                    Err(_) => {
+                                        warn!("FTP ICAP channel closed");
+                                        icap_alive = false;
+                                    }
                                 }
                             }
                         }
                         Err(_) => break,
                     }
                 }
-
-                _ = idle_interval.tick() => break,
+                _ = idle_interval.tick() => {
+                    idle_count += 1;
+                    if self.idle_checker.check_quit(idle_count) {
+                        break;
+                    }
+                }
             }
         }
 
-        state.clt_read_finished = true;
-
-        // 3) Flush upstream.  This ensures the FTP server data channel
-        //    has received everything before we close.  Failure here is
-        //    a real upload failure (reported to caller as zero bytes
-        //    forwarded).
-        let _ = ups_w.flush().await;
-
-        if !icap_alive {
-            return FtpAdaptationEndState::OriginalTransferredAfterFallback {
-                bytes: total_bytes,
-                icap_error: last_icap_err
-                    .map(|e| format!("{e}"))
-                    .unwrap_or_else(|| "icap write failed".to_string()),
-            };
-        }
-
-        // 4) Terminating chunk ("0\r\n\r\n") + flush ICAP writer.
-        let terminator_sent = self
-            .icap_connection
-            .writer
-            .write_all(b"0\r\n\r\n")
-            .await;
-        let terminator_sent = match terminator_sent {
-            Ok(()) => self.icap_connection.writer.flush().await,
-            Err(e) => Err(e),
-        };
-        self.icap_connection.mark_writer_finished();
-
-        if terminator_sent.is_err() {
-            return FtpAdaptationEndState::OriginalTransferredAfterFallback {
-                bytes: total_bytes,
-                icap_error: "icap terminator write failed".to_string(),
-            };
-        }
-
-        // 5) Read ICAP response.  This is only an audit verdict - it
-        //    does NOT block upload delivery.  All failures here just
-        //    lose audit information, never the upload.
-        let (icap_code, icap_reason) =
-            match crate::reqmod::response::ReqmodResponse::parse(
-                &mut self.icap_connection.reader,
-                self.icap_client.config.icap_max_header_size,
-                &self.icap_client.config.respond_shared_names,
-            )
-            .await
-            {
-                Ok(rsp) => (rsp.code, rsp.reason),
-                Err(_) => {
-                    self.icap_connection.mark_reader_finished();
-                    let _ = self.icap_client.save_connection(self.icap_connection);
-                    return FtpAdaptationEndState::OriginalTransferredAfterFallback {
-                        bytes: total_bytes,
-                        icap_error: "icap response parse failed".to_string(),
-                    };
-                }
-            };
-
-        self.icap_connection.mark_reader_finished();
-        let _ = self.icap_client.save_connection(self.icap_connection);
-
-        FtpAdaptationEndState::OriginalTransferred {
-            icap_status_code: icap_code,
-            icap_reason,
-            bytes: total_bytes,
-        }
+        drop(chunk_tx);
+        Ok((total_bytes, icap_alive, icap_handle))
     }
 
     /// Audit-only mode: stream the data channel only to ICAP, no
@@ -380,6 +621,9 @@ impl<I: IdleCheck> FtpUploadAdapter<I> {
         let mut buf = vec![0u8; buf_size];
         let mut total_bytes: u64 = 0;
         let mut idle_interval = self.idle_checker.interval_timer();
+        let mut write_buf = bytes::BytesMut::with_capacity(4096);
+
+        let mut idle_count = 0usize;
 
         loop {
             tokio::select! {
@@ -388,8 +632,9 @@ impl<I: IdleCheck> FtpUploadAdapter<I> {
                     match n {
                         Ok(0) => break,
                         Ok(n) => {
+                            idle_count = 0;
                             total_bytes += n as u64;
-                            if write_icap_chunk(&mut self.icap_connection.writer, &buf[..n])
+                            if write_icap_chunk(&mut self.icap_connection.writer, &buf[..n], &mut write_buf)
                                 .await
                                 .is_err()
                             {
@@ -412,7 +657,12 @@ impl<I: IdleCheck> FtpUploadAdapter<I> {
                         Err(_) => break,
                     }
                 }
-                _ = idle_interval.tick() => break,
+                _ = idle_interval.tick() => {
+                    idle_count += 1;
+                    if self.idle_checker.check_quit(idle_count) {
+                        break;
+                    }
+                }
             }
         }
 
@@ -422,31 +672,66 @@ impl<I: IdleCheck> FtpUploadAdapter<I> {
         let _ = self.icap_connection.writer.flush().await;
         self.icap_connection.mark_writer_finished();
 
-        let (icap_code, icap_reason) =
-            match crate::reqmod::response::ReqmodResponse::parse(
-                &mut self.icap_connection.reader,
-                self.icap_client.config.icap_max_header_size,
-                &self.icap_client.config.respond_shared_names,
-            )
-            .await
-            {
-                Ok(rsp) => (rsp.code, rsp.reason),
-                Err(_) => {
-                    self.icap_connection.mark_reader_finished();
-                    let _ = self.icap_client.save_connection(self.icap_connection);
-                    return FtpAdaptationEndState::OriginalTransferredAfterFallback {
-                        bytes: total_bytes,
-                        icap_error: "icap response parse failed".to_string(),
-                    };
+        let rsp = match crate::reqmod::response::ReqmodResponse::parse(
+            &mut self.icap_connection.reader,
+            self.icap_client.config.icap_max_header_size,
+            &self.icap_client.config.respond_shared_names,
+        )
+        .await
+        {
+            Ok(rsp) => rsp,
+            Err(_) => {
+                warn!("FTP ICAP response parse failed");
+                self.icap_connection.mark_reader_finished();
+                return FtpAdaptationEndState::OriginalTransferredAfterFallback {
+                    bytes: total_bytes,
+                    icap_error: "icap response parse failed".to_string(),
+                };
+            }
+        };
+
+        // Drain any remaining response body data so the connection can be
+        // safely reused.  Without this, leftover bytes would corrupt the
+        // next ICAP request on the same connection.
+        // Skip draining for responses with no body (e.g. 204 No Content),
+        // where there is nothing to read and a 5s timeout would be wasted.
+        let drain_clean = if !rsp.has_body() {
+            true
+        } else {
+            let mut drain_buf = [0u8; 65536];
+            let mut clean = false;
+            loop {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    self.icap_connection.reader.read(&mut drain_buf),
+                )
+                .await
+                {
+                    Ok(Ok(0)) => {
+                        clean = true;
+                        break;
+                    }
+                    Ok(Ok(_)) => continue,
+                    Ok(Err(_)) | Err(_) => break,
                 }
-            };
+            }
+            clean
+        };
 
         self.icap_connection.mark_reader_finished();
-        let _ = self.icap_client.save_connection(self.icap_connection);
+
+        if drain_clean && rsp.keep_alive && rsp.code >= 200 && rsp.code < 300 {
+            let _ = self.icap_client.save_connection(self.icap_connection);
+        } else {
+            warn!(
+                "FTP ICAP connection discarded (code={}, keep_alive={}, drain_clean={})",
+                rsp.code, rsp.keep_alive, drain_clean
+            );
+        }
 
         FtpAdaptationEndState::AuditOnly {
-            icap_status_code: icap_code,
-            icap_reason,
+            icap_status_code: rsp.code,
+            icap_reason: rsp.reason,
             bytes: total_bytes,
         }
     }
@@ -502,17 +787,120 @@ impl<I: IdleCheck> FtpUploadAdapter<I> {
     }
 }
 
+/// Find the position of `\r\n\r\n` (end of ICAP/HTTP headers) in `buf`.
+/// Returns the index of the first byte of the match.
+fn find_icap_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+/// Append `<hex-size>\r\n` to the buffer without heap allocation.
+fn append_chunk_header(buf: &mut bytes::BytesMut, len: usize) {
+    // Maximum hex digits for usize on 64-bit: 16
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    // Calculate number of hex digits needed
+    let mut num_digits = 0usize;
+    let mut n = len;
+    if n == 0 {
+        num_digits = 1;
+    } else {
+        while n > 0 {
+            num_digits += 1;
+            n >>= 4;
+        }
+    }
+
+    // Use stack-based buffer: hex digits + "\r\n"
+    let total_len = num_digits + 2;
+    let mut tmp = [0u8; 18]; // 16 hex digits max + "\r\n"
+
+    // Write hex digits from right to left within the digit region
+    let mut pos = num_digits;
+    n = len;
+    while n > 0 {
+        pos -= 1;
+        tmp[pos] = HEX[n & 0xf];
+        n >>= 4;
+    }
+    if len == 0 {
+        tmp[0] = b'0';
+    }
+
+    // Add "\r\n" after hex digits
+    tmp[num_digits] = b'\r';
+    tmp[num_digits + 1] = b'\n';
+
+    buf.extend_from_slice(&tmp[..total_len]);
+}
+
 /// Send a single chunk to ICAP in `<hex-size>\r\n<data>\r\n` form.
-/// (HTTP/1.1 chunked transfer encoding per RFC 7230 4.1).
-async fn write_icap_chunk<W: AsyncWrite + Unpin>(writer: &mut W, data: &[u8]) -> io::Result<()> {
-    let chunk_header = format!("{:x}\r\n",data.len());
-    writer.write_all(chunk_header.as_bytes()).await?;
-    writer.write_all(data).await?;
-    writer.write_all(b"\r\n").await
+/// Reuses the caller-provided `BytesMut` buffer to avoid per-chunk allocations.
+async fn write_icap_chunk<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    data: &[u8],
+    buf: &mut bytes::BytesMut,
+) -> io::Result<()> {
+    buf.clear();
+    append_chunk_header(buf, data.len());
+    buf.extend_from_slice(data);
+    buf.extend_from_slice(b"\r\n");
+    writer.write_all(buf).await
 }
 
 /// A cheap builder/helper for creating a [`ReqmodAdaptationRunState`]
 /// in FTP callers that don't have a mail module state tracker.
 pub fn new_adaptation_run_state() -> ReqmodAdaptationRunState {
     ReqmodAdaptationRunState::new(Instant::now())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_chunk_header;
+
+    #[test]
+    fn test_append_chunk_header_zero() {
+        let mut buf = bytes::BytesMut::new();
+        append_chunk_header(&mut buf, 0);
+        assert_eq!(buf.as_ref(), b"0\r\n");
+    }
+
+    #[test]
+    fn test_append_chunk_header_single_digit() {
+        let mut buf = bytes::BytesMut::new();
+        append_chunk_header(&mut buf, 5);
+        assert_eq!(buf.as_ref(), b"5\r\n");
+    }
+
+    #[test]
+    fn test_append_chunk_header_two_digits() {
+        let mut buf = bytes::BytesMut::new();
+        append_chunk_header(&mut buf, 255);
+        assert_eq!(buf.as_ref(), b"ff\r\n");
+    }
+
+    #[test]
+    fn test_append_chunk_header_three_digits() {
+        let mut buf = bytes::BytesMut::new();
+        append_chunk_header(&mut buf, 4096);
+        assert_eq!(buf.as_ref(), b"1000\r\n");
+    }
+
+    #[test]
+    fn test_append_chunk_header_large() {
+        let mut buf = bytes::BytesMut::new();
+        append_chunk_header(&mut buf, 0x10000);
+        assert_eq!(buf.as_ref(), b"10000\r\n");
+    }
+
+    #[test]
+    fn test_append_chunk_header_usize_max() {
+        let mut buf = bytes::BytesMut::new();
+        append_chunk_header(&mut buf, usize::MAX);
+        // usize::MAX on 64-bit = 0xffffffffffffffff = 16 f's
+        if cfg!(target_pointer_width = "64") {
+            assert_eq!(buf.as_ref(), b"ffffffffffffffff\r\n");
+        } else {
+            assert_eq!(buf.as_ref(), b"ffffffff\r\n");
+        }
+    }
 }

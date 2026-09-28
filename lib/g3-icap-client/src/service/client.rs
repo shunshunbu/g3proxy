@@ -4,6 +4,7 @@
  */
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use tokio::sync::oneshot;
@@ -41,7 +42,12 @@ impl IcapServiceClient {
         let (rsp_sender, rsp_receiver) = oneshot::channel();
         let cmd = IcapServiceClientCommand::FetchConnection(rsp_sender);
         if self.cmd_sender.send_async(cmd).await.is_ok() {
-            rsp_receiver.await.ok()
+            // Timeout: pool may have stale connections whose pollers already
+            // exited. Without this, fetch_from_pool could hang indefinitely.
+            match tokio::time::timeout(Duration::from_secs(5), rsp_receiver).await {
+                Ok(Ok(conn)) => Some(conn),
+                _ => None,
+            }
         } else {
             None
         }
